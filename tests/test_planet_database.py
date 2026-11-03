@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import tempfile
 import unittest
 import zipfile
@@ -9,12 +10,16 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from main import (
+    APP_SETTINGS_FILENAME,
     DATABASE_FILENAME,
     LIGHTYEARS_PER_GRID_STEP,
     MAX_SPACING,
     MIN_SPACING,
+    STAR_TYPES,
+    app_settings_path,
     create_unique_system_id,
     database_path,
+    default_app_settings,
     empty_project,
     export_project_archive,
     fit_view_to_systems,
@@ -22,17 +27,105 @@ from main import (
     grid_dash_pattern,
     grid_interval_lightyears,
     grid_subdivision_factor,
+    load_app_settings,
     load_database,
     load_legacy_database,
     load_project_archive,
+    nearest_systems,
     pan_to_center_coordinates,
     project_isometric,
     snap_to_grid,
+    _parse_database_contents,
     viewport_ground_bounds,
 )
 
 
 class DatabaseTests(unittest.TestCase):
+    def test_application_settings_are_stored_in_appdata(self) -> None:
+        with patch.dict(
+            "os.environ", {"APPDATA": r"C:\Users\Tester\AppData\Roaming"}
+        ):
+            expected = (
+                Path(r"C:\Users\Tester\AppData\Roaming")
+                / "Planet Database"
+                / APP_SETTINGS_FILENAME
+            )
+            self.assertEqual(app_settings_path(), expected)
+
+    def test_missing_application_settings_use_resizable_panel_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / APP_SETTINGS_FILENAME
+            self.assertEqual(load_app_settings(path), default_app_settings())
+
+    def test_saved_panel_widths_load_and_invalid_widths_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / APP_SETTINGS_FILENAME
+            path.write_text(
+                json.dumps({"panelWidths": {"catalog": 420, "editor": 480}}),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                load_app_settings(path),
+                {"panelWidths": {"catalog": 420, "editor": 480}},
+            )
+            path.write_text(
+                json.dumps({"panelWidths": {"catalog": True}}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "catalog panel width"):
+                load_app_settings(path)
+
+    def test_nearest_systems_uses_3d_distance_and_excludes_selected(self) -> None:
+        systems = [
+            {"id": "z-near", "name": "Near in Z", "x": 0, "y": 0, "z": 3},
+            {"id": "y-near", "name": "Near in Y", "x": 0, "y": 4, "z": 0},
+            {"id": "x-near", "name": "Near in X", "x": 5, "y": 0, "z": 0},
+            {"id": "self", "name": "Current", "x": 1, "y": 1, "z": 1},
+            {"id": "far", "name": "Far", "x": 100, "y": 100, "z": 100},
+        ]
+
+        nearest = nearest_systems(
+            systems, (1, 1, 1), exclude_id="self", limit=4
+        )
+
+        self.assertEqual(
+            [system["id"] for system, _distance in nearest],
+            ["z-near", "y-near", "x-near", "far"],
+        )
+        for (_system, distance), expected in zip(
+            nearest, (math.sqrt(6), math.sqrt(11), math.sqrt(18), math.sqrt(29_403))
+        ):
+            self.assertAlmostEqual(distance, expected)
+
+    def test_white_star_records_migrate_to_white_dwarf(self) -> None:
+        contents = json.dumps(
+            {
+                "formatVersion": 2,
+                "coordinateUnit": "light-years",
+                "systems": [
+                    {
+                        "id": "star",
+                        "name": "White Star",
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "starType": "white_star",
+                    }
+                ],
+            }
+        )
+
+        data, migrated = _parse_database_contents(contents)
+
+        self.assertTrue(migrated)
+        self.assertEqual(data["systems"][0]["starType"], "white_dwarf")
+
+    def test_stellar_types_include_trinary_and_reuse_white_star_marker(self) -> None:
+        self.assertNotIn("white_star", STAR_TYPES)
+        self.assertEqual(STAR_TYPES["white_dwarf"][2], "circle")
+        self.assertEqual(STAR_TYPES["trinary_star"][0], "Trinary star")
+        self.assertEqual(STAR_TYPES["trinary_star"][2], "trinary")
+
     def test_database_is_stored_in_appdata(self) -> None:
         with patch.dict(
             "os.environ", {"APPDATA": r"C:\Users\Tester\AppData\Roaming"}
@@ -306,3 +399,4 @@ class InfiniteLightyearGridTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+    load_app_settings,

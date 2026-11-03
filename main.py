@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import copy
+import heapq
 import json
 import math
 import os
@@ -19,9 +20,10 @@ import darkdetect
 
 
 APP_NAME = "Planet Database"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.9.0"
 APP_ICON_PATH = Path(__file__).with_name("icons") / "planet-database.ico"
 DATABASE_FILENAME = "planet-systems.json"
+APP_SETTINGS_FILENAME = "app-settings.json"
 LEGACY_SETTINGS_FILENAME = "settings.json"
 LIGHTYEARS_PER_GRID_STEP = 1_000
 INITIAL_SPACING = 16.0
@@ -42,13 +44,14 @@ NICE_GRID_INTERVALS_LIGHTYEARS = (
     500,
     1_000,
 )
-PANEL = ("#e4e9ef", "#0b111b")
-CANVAS_BACKGROUND = ("#f7f9fb", "#060a10")
-GRID = ("#becbd7", "#263849")
-SUBGRID = ("#d5dee6", "#182733")
-TEXT = ("#172735", "#e3edf5")
-MUTED = ("#52697c", "#7990a4")
-ACCENT = ("#007e98", "#6de3f5")
+PANEL = ("#f5f5f5", "#171717")
+APP_BACKGROUND = ("#e9e9e9", "#0b0b0b")
+CANVAS_BACKGROUND = ("#f8f8f8", "#070707")
+GRID = ("#c9c9c9", "#333333")
+SUBGRID = ("#e1e1e1", "#202020")
+TEXT = ("#252525", "#ededed")
+MUTED = ("#6b6b6b", "#a5a5a5")
+ACCENT = ("#656565", "#b6b6b6")
 MAX_COORDINATE_LIGHTYEARS = 10**15
 DEFAULT_STAR_TYPE = "yellow_dwarf"
 STAR_TYPES: dict[str, tuple[str, str, str, int]] = {
@@ -56,16 +59,16 @@ STAR_TYPES: dict[str, tuple[str, str, str, int]] = {
     "red_dwarf": ("Red dwarf", "#e05c52", "circle", 4),
     "orange_dwarf": ("Orange dwarf", "#ee9147", "circle", 5),
     "brown_dwarf": ("Brown dwarf", "#a96f58", "circle", 4),
-    "white_dwarf": ("White dwarf", "#f3f5ff", "ring", 4),
+    "white_dwarf": ("White dwarf", "#eaf7ff", "circle", 6),
     "red_giant": ("Red giant", "#e45845", "circle", 8),
     "orange_giant": ("Orange giant", "#f08c3d", "circle", 8),
     "blue_giant": ("Blue giant", "#68aaff", "circle", 8),
-    "white_star": ("White star", "#eaf7ff", "circle", 6),
     "wolf_rayet": ("Wolf–Rayet star", "#e98cff", "cross", 7),
     "neutron_star": ("Neutron star", "#80eaff", "diamond", 4),
     "pulsar": ("Pulsar", "#55ddff", "pulsar", 5),
     "black_hole": ("Black hole", "#bb91ff", "black_hole", 6),
     "binary_star": ("Binary star", "#ffd56a", "binary", 6),
+    "trinary_star": ("Trinary star", "#ffd56a", "trinary", 7),
 }
 STAR_TYPE_LABELS = {
     details[0]: star_type for star_type, details in STAR_TYPES.items()
@@ -76,6 +79,28 @@ def _theme_color(color: str | tuple[str, str], is_dark: bool) -> str:
     if isinstance(color, str):
         return color
     return color[1 if is_dark else 0]
+
+
+def nearest_systems(
+    systems: list[dict[str, Any]],
+    coordinates: tuple[int, int, int],
+    *,
+    exclude_id: str | None = None,
+    limit: int = 4,
+) -> list[tuple[dict[str, Any], float]]:
+    x, y, z = coordinates
+    return heapq.nsmallest(
+        limit,
+        (
+            (
+                system,
+                math.dist((x, y, z), (system["x"], system["y"], system["z"])),
+            )
+            for system in systems
+            if system["id"] != exclude_id
+        ),
+        key=lambda item: item[1],
+    )
 
 
 def app_data_directory() -> Path:
@@ -90,6 +115,39 @@ def app_data_directory() -> Path:
 
 def database_path() -> Path:
     return app_data_directory() / DATABASE_FILENAME
+
+
+def app_settings_path() -> Path:
+    return app_data_directory() / APP_SETTINGS_FILENAME
+
+
+def default_app_settings() -> dict[str, Any]:
+    return {"panelWidths": {"catalog": 310, "editor": 350}}
+
+
+def load_app_settings(path: Path | None = None) -> dict[str, Any]:
+    settings_path = path or app_settings_path()
+    if not settings_path.exists():
+        return default_app_settings()
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read application settings:\n{exc}") from exc
+    if not isinstance(settings, dict):
+        raise ValueError("The application settings file must contain a JSON object.")
+
+    panel_widths = settings.get("panelWidths", {})
+    if not isinstance(panel_widths, dict):
+        raise ValueError("The application panel width settings are invalid.")
+    defaults = default_app_settings()["panelWidths"]
+    widths: dict[str, int] = {}
+    for panel, default in defaults.items():
+        width = panel_widths.get(panel, default)
+        minimum = 220 if panel == "catalog" else 290
+        if type(width) is not int or not minimum <= width <= 900:
+            raise ValueError(f"The saved {panel} panel width is invalid.")
+        widths[panel] = width
+    return {"panelWidths": widths}
 
 
 def empty_project() -> dict[str, Any]:
@@ -212,6 +270,16 @@ def _parse_database_contents(contents: str) -> tuple[dict[str, Any], bool]:
 
     if version != 2 or data.get("coordinateUnit") != "light-years":
         raise ValueError("This database has an unsupported format or coordinate unit.")
+    systems = data.get("systems")
+    if isinstance(systems, list):
+        migrated_systems = [
+            {**system, "starType": "white_dwarf"}
+            if isinstance(system, dict) and system.get("starType") == "white_star"
+            else system
+            for system in systems
+        ]
+        if migrated_systems != systems:
+            return _validate_systems({**data, "systems": migrated_systems}), True
     return _validate_systems(data), False
 
 
@@ -537,6 +605,13 @@ class PlanetDatabaseApp:
             self.root.iconbitmap(str(APP_ICON_PATH))
 
         self.data_path = database_path()
+        self.settings_path = app_settings_path()
+        self.app_settings_error: str | None = None
+        try:
+            self.app_settings = load_app_settings(self.settings_path)
+        except ValueError as exc:
+            self.app_settings = default_app_settings()
+            self.app_settings_error = str(exc)
         self.project_data = empty_project()
         self.selected_system_id: str | None = None
         self._hovered_system_id: str | None = None
@@ -551,6 +626,10 @@ class PlanetDatabaseApp:
         self._undo_history: list[dict[str, Any]] = []
         self._redo_history: list[dict[str, Any]] = []
         self._history_limit = 100
+        self.editor_panel: ctk.CTkFrame | None = None
+        self.nearest_system_labels: list[ctk.CTkLabel] = []
+        self._nearest_refresh_after: str | None = None
+        self._settings_save_after: str | None = None
 
         self.x_var = tk.StringVar(value="0")
         self.y_var = tk.StringVar(value="0")
@@ -562,12 +641,20 @@ class PlanetDatabaseApp:
         self.id_var = tk.StringVar()
         self.status_var = tk.StringVar()
 
+        self.root.configure(fg_color=APP_BACKGROUND)
         self._build_ui()
         self.root.bind("<Control-s>", self._on_shortcut_save)
         self.root.bind("<Control-z>", self._on_shortcut_undo)
         self.root.bind("<Control-y>", self._on_shortcut_redo)
         self._load_startup_database()
         self._sync_system_theme()
+        if self.app_settings_error is not None:
+            messagebox.showerror(
+                "Could not load application settings",
+                f"{self.app_settings_error}\n\nDefault panel sizes will be used.",
+                parent=self.root,
+            )
+        self.root.protocol("WM_DELETE_WINDOW", self._close_app)
         self.root.after(500, self._poll_system_theme)
         self.root.after(100, self._maximize_window)
 
@@ -580,6 +667,48 @@ class PlanetDatabaseApp:
         except tk.TclError:
             return
         self.root.after(150, self._fit_database_view)
+
+    def _on_sash_release(self, _event: tk.Event[tk.PanedWindow]) -> None:
+        if self._settings_save_after is not None:
+            self.root.after_cancel(self._settings_save_after)
+        self._settings_save_after = self.root.after(180, self._persist_panel_widths)
+
+    def _persist_panel_widths(self) -> None:
+        self._settings_save_after = None
+        panes = self.workspace_body.panes()
+        if not panes:
+            return
+        panel_widths = dict(self.app_settings["panelWidths"])
+        catalog = self.workspace_body.nametowidget(panes[0]).winfo_width()
+        if catalog >= 220:
+            panel_widths["catalog"] = min(catalog, 900)
+        pane_names = {str(pane) for pane in panes}
+        if self.editor_panel is not None and str(self.editor_panel) in pane_names:
+            editor = self.editor_panel.winfo_width()
+            if editor >= 290:
+                panel_widths["editor"] = min(editor, 900)
+        settings = {"panelWidths": panel_widths}
+        try:
+            atomic_write_json(self.settings_path, settings)
+        except OSError as exc:
+            self.status_var.set(f"Could not save application settings: {exc}")
+            messagebox.showerror(
+                "Could not save application settings",
+                str(exc),
+                parent=self.root,
+            )
+            return
+        self.app_settings = settings
+
+    def _close_app(self) -> None:
+        if self._settings_save_after is not None:
+            try:
+                self.root.after_cancel(self._settings_save_after)
+            except tk.TclError:
+                pass
+            self._settings_save_after = None
+        self._persist_panel_widths()
+        self.root.destroy()
 
     def _build_ui(self) -> None:
         header = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -599,180 +728,114 @@ class PlanetDatabaseApp:
             font=ctk.CTkFont(size=11, weight="bold"),
         ).pack(side="right", pady=(5, 0))
 
-        body = ctk.CTkFrame(self.root, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        toolbar = ctk.CTkFrame(self.root, fg_color=PANEL, corner_radius=12)
+        toolbar.pack(fill="x", padx=16, pady=(2, 12))
+        groups = (
+            (
+                "SYSTEM",
+                (
+                    ("Add star", self._new_location, True),
+                    ("Save system", self._save_system, False),
+                ),
+            ),
+            (
+                "HISTORY",
+                (
+                    ("Undo  ·  Ctrl+Z", self._undo, False),
+                    ("Redo  ·  Ctrl+Y", self._redo, False),
+                ),
+            ),
+            (
+                "PROJECT",
+                (
+                    ("Import", self._import_project, False),
+                    ("Export", self._export_project, False),
+                ),
+            ),
+        )
+        for group_index, (group_name, actions) in enumerate(groups):
+            group = ctk.CTkFrame(toolbar, fg_color="transparent")
+            group.pack(side="left", padx=(14 if group_index == 0 else 8, 8), pady=8)
+            ctk.CTkLabel(
+                group,
+                text=group_name,
+                text_color=MUTED,
+                font=ctk.CTkFont(size=9, weight="bold"),
+            ).pack(anchor="w", padx=3, pady=(0, 4))
+            action_row = ctk.CTkFrame(group, fg_color="transparent")
+            action_row.pack()
+            for action_index, (label, command, primary) in enumerate(actions):
+                button = ctk.CTkButton(
+                    action_row,
+                    text=label,
+                    width=122 if group_name == "SYSTEM" else 116,
+                    height=32,
+                    fg_color=ACCENT if primary else ("#e5e5e5", "#242424"),
+                    text_color=("#ffffff", "#111111") if primary else TEXT,
+                    hover_color=("#d2d2d2", "#363636") if primary else ("#d9d9d9", "#333333"),
+                    command=command,
+                )
+                button.pack(side="left", padx=(0, 5 if action_index == 0 else 0))
+                if label.startswith("Save"):
+                    self.save_toolbar_button = button
+                    button.configure(state="disabled")
 
-        sidebar = ctk.CTkFrame(body, width=320, corner_radius=10, fg_color=PANEL)
-        sidebar.pack(side="left", fill="y")
+        body = tk.PanedWindow(
+            self.root,
+            orient=tk.HORIZONTAL,
+            sashwidth=8,
+            sashpad=2,
+            sashrelief=tk.FLAT,
+            sashcursor="sb_h_double_arrow",
+            background=_theme_color(APP_BACKGROUND, self._theme == "Dark"),
+            borderwidth=0,
+            opaqueresize=True,
+        )
+        body.bind("<ButtonRelease-1>", self._on_sash_release, add="+")
+        self.workspace_body = body
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        sidebar = ctk.CTkFrame(body, width=310, corner_radius=12, fg_color=PANEL)
         sidebar.pack_propagate(False)
 
         ctk.CTkLabel(
             sidebar,
-            text="STAR SYSTEM",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=MUTED,
-        ).pack(anchor="w", padx=18, pady=(18, 8))
+            text="SYSTEM CATALOG",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=TEXT,
+        ).pack(anchor="w", padx=16, pady=(16, 4))
         ctk.CTkLabel(
             sidebar,
-            text="Coordinates are stored in light-years in your AppData database.",
+            text="Select a system to focus it and open its editor.",
             text_color=MUTED,
             font=ctk.CTkFont(size=10),
-            wraplength=276,
+            wraplength=270,
             justify="left",
-        ).pack(anchor="w", padx=18, pady=(0, 14))
-
-        coordinate_fields = ctk.CTkFrame(sidebar, fg_color="transparent")
-        coordinate_fields.pack(fill="x", padx=18)
-        self.coordinate_entries: dict[str, ctk.CTkEntry] = {}
-        for column, axis, variable in (
-            (0, "X · LY", self.x_var),
-            (1, "Y · LY", self.y_var),
-            (2, "Z · LY", self.z_var),
-        ):
-            field = ctk.CTkFrame(coordinate_fields, fg_color="transparent")
-            field.grid(row=0, column=column, sticky="ew", padx=(0, 8))
-            coordinate_fields.grid_columnconfigure(column, weight=1)
-            ctk.CTkLabel(
-                field,
-                text=axis,
-                text_color=MUTED,
-                font=ctk.CTkFont(size=10, weight="bold"),
-            ).pack(anchor="w", pady=(0, 5))
-            entry = ctk.CTkEntry(field, textvariable=variable, width=82)
-            entry.pack(fill="x")
-            self._bind_shortcuts(entry)
-            self.coordinate_entries[axis[0].lower()] = entry
-
-        ctk.CTkLabel(
-            sidebar,
-            text="SYSTEM NAME",
-            text_color=MUTED,
-            font=ctk.CTkFont(size=10, weight="bold"),
-        ).pack(anchor="w", padx=18, pady=(16, 5))
-        name_entry = ctk.CTkEntry(sidebar, textvariable=self.name_var)
-        name_entry.pack(fill="x", padx=18)
-        self._bind_shortcuts(name_entry)
-        ctk.CTkLabel(
-            sidebar,
-            text="STAR TYPE",
-            text_color=MUTED,
-            font=ctk.CTkFont(size=10, weight="bold"),
-        ).pack(anchor="w", padx=18, pady=(12, 5))
-        self.star_type_menu = ctk.CTkOptionMenu(
-            sidebar,
-            variable=self.star_type_var,
-            values=list(STAR_TYPE_LABELS),
-            fg_color=("#d7e3eb", "#172431"),
-            button_color=ACCENT,
-            button_hover_color=("#00677d", "#a0eff8"),
-            text_color=TEXT,
-            dropdown_fg_color=PANEL,
-            dropdown_text_color=TEXT,
-        )
-        self.star_type_menu.pack(fill="x", padx=18)
-        ctk.CTkLabel(
-            sidebar,
-            text="STABLE SYSTEM ID",
-            text_color=MUTED,
-            font=ctk.CTkFont(size=10, weight="bold"),
-        ).pack(anchor="w", padx=18, pady=(12, 5))
-        id_row = ctk.CTkFrame(sidebar, fg_color="transparent")
-        id_row.pack(fill="x", padx=18)
-        ctk.CTkEntry(
-            id_row,
-            textvariable=self.id_var,
-            state="readonly",
-            font=ctk.CTkFont(family="Consolas", size=10),
-        ).pack(side="left", fill="x", expand=True, padx=(0, 6))
-        ctk.CTkButton(
-            id_row,
-            text="COPY",
-            width=54,
-            command=self._copy_system_id,
-        ).pack(side="right")
-        ctk.CTkButton(
-            sidebar,
-            text="SAVE SYSTEM",
-            fg_color=ACCENT,
-            text_color=("#ffffff", "#071016"),
-            hover_color=("#00677d", "#a0eff8"),
-            command=self._save_system,
-        ).pack(fill="x", padx=18, pady=(10, 6))
-        ctk.CTkButton(
-            sidebar,
-            text="NEW LOCATION",
-            fg_color=("gray80", "#172431"),
-            text_color=TEXT,
-            command=self._new_location,
-        ).pack(fill="x", padx=18)
-        ctk.CTkButton(
-            sidebar,
-            text="DELETE SYSTEM",
-            fg_color=("#f1d8d6", "#48201f"),
-            text_color=("#8d2824", "#ffd9d6"),
-            hover_color=("#e6b9b5", "#6a2926"),
-            command=self._delete_system,
-        ).pack(fill="x", padx=18, pady=(6, 0))
-        history_buttons = ctk.CTkFrame(sidebar, fg_color="transparent")
-        history_buttons.pack(fill="x", padx=18, pady=(6, 0))
-        ctk.CTkButton(
-            history_buttons,
-            text="UNDO  Ctrl+Z",
-            fg_color=("gray80", "#172431"),
-            text_color=TEXT,
-            command=self._undo,
-        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
-        ctk.CTkButton(
-            history_buttons,
-            text="REDO  Ctrl+Y",
-            fg_color=("gray80", "#172431"),
-            text_color=TEXT,
-            command=self._redo,
-        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
-        archive_buttons = ctk.CTkFrame(sidebar, fg_color="transparent")
-        archive_buttons.pack(fill="x", padx=18, pady=(6, 0))
-        ctk.CTkButton(
-            archive_buttons,
-            text="EXPORT",
-            fg_color=("gray80", "#172431"),
-            text_color=TEXT,
-            command=self._export_project,
-        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
-        ctk.CTkButton(
-            archive_buttons,
-            text="IMPORT",
-            fg_color=("gray80", "#172431"),
-            text_color=TEXT,
-            command=self._import_project,
-        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
-
-        ctk.CTkFrame(sidebar, height=2, fg_color=GRID).pack(
-            fill="x", padx=18, pady=16
-        )
+        ).pack(anchor="w", padx=16, pady=(0, 12))
         ctk.CTkLabel(
             sidebar,
             text="SAVED SYSTEMS",
             text_color=MUTED,
-            font=ctk.CTkFont(size=10, weight="bold"),
-        ).pack(anchor="w", padx=18, pady=(0, 7))
+            font=ctk.CTkFont(size=9, weight="bold"),
+        ).pack(anchor="w", padx=16, pady=(0, 7))
         self.system_list = ctk.CTkScrollableFrame(
             sidebar,
             fg_color="transparent",
             scrollbar_button_color=GRID,
             scrollbar_button_hover_color=ACCENT,
         )
-        self.system_list.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        self.system_list.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.system_rows: dict[str, ctk.CTkButton] = {}
 
         map_panel = ctk.CTkFrame(body, corner_radius=10, fg_color=PANEL)
-        map_panel.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        self.map_panel = map_panel
         self.canvas = tk.Canvas(
             map_panel,
             background=self.canvas_background,
-            highlightthickness=1,
-            highlightbackground="#1a2734",
+            highlightthickness=0,
+            borderwidth=0,
         )
-        self.canvas.pack(fill="both", expand=True, padx=8, pady=8)
+        self.canvas.pack(fill="both", expand=True, padx=4, pady=4)
         self.canvas.bind("<Configure>", lambda _event: self._draw_grid())
         self.canvas.bind("<Button-3>", self._on_canvas_click)
         self.canvas.bind("<ButtonPress-1>", self._start_pan)
@@ -783,6 +846,13 @@ class PlanetDatabaseApp:
         self.canvas.bind("<ButtonRelease-2>", self._end_pan)
         self.canvas.bind("<Motion>", self._on_canvas_motion)
         self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
+        body.add(
+            sidebar,
+            minsize=220,
+            width=self.app_settings["panelWidths"]["catalog"],
+            stretch="never",
+        )
+        body.add(map_panel, minsize=300, stretch="always")
 
         ctk.CTkLabel(
             self.root,
@@ -790,7 +860,307 @@ class PlanetDatabaseApp:
             anchor="w",
             text_color=MUTED,
             font=ctk.CTkFont(size=10),
-        ).pack(fill="x", padx=20, pady=(0, 8))
+        ).pack(fill="x", padx=20, pady=(0, 3))
+
+    def _open_star_editor(self) -> None:
+        if self.editor_panel is not None and self.editor_panel.winfo_exists():
+            pane_names = {
+                str(pane) for pane in self.workspace_body.panes()
+            }
+            if str(self.editor_panel) not in pane_names:
+                self.workspace_body.add(
+                    self.editor_panel,
+                    before=self.map_panel,
+                    minsize=290,
+                    width=350,
+                    stretch="never",
+                )
+            self._update_star_editor_mode()
+            self._update_nearest_references()
+            return
+
+        panel = ctk.CTkFrame(
+            self.workspace_body,
+            width=self.app_settings["panelWidths"]["editor"],
+            corner_radius=12,
+            fg_color=PANEL,
+        )
+        self.editor_panel = panel
+        panel.pack_propagate(False)
+        self.workspace_body.add(
+            panel,
+            before=self.map_panel,
+            minsize=290,
+            width=self.app_settings["panelWidths"]["editor"],
+            stretch="never",
+        )
+        content = ctk.CTkScrollableFrame(
+            panel,
+            fg_color="transparent",
+            scrollbar_button_color=GRID,
+            scrollbar_button_hover_color=ACCENT,
+        )
+        content.pack(fill="both", expand=True, padx=12, pady=10)
+        header = ctk.CTkFrame(content, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 14))
+        title = "Edit star system" if self.selected_system_id else "Add star system"
+        self.editor_title = ctk.CTkLabel(
+            header,
+            text=title,
+            text_color=TEXT,
+            font=ctk.CTkFont(size=20, weight="bold"),
+        )
+        self.editor_title.pack(side="left")
+        ctk.CTkButton(
+            header,
+            text="Close",
+            width=64,
+            height=28,
+            fg_color=("gray85", "#242424"),
+            text_color=TEXT,
+            hover_color=("#d9d9d9", "#333333"),
+            command=self._close_star_editor,
+        ).pack(side="right")
+        ctk.CTkLabel(
+            content,
+            text="Give this location a name, type, and coordinates.",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=11),
+        ).pack(anchor="w", pady=(0, 18))
+
+        ctk.CTkLabel(
+            content,
+            text="SYSTEM NAME",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=9, weight="bold"),
+        ).pack(anchor="w", pady=(0, 5))
+        name_entry = ctk.CTkEntry(
+            content,
+            textvariable=self.name_var,
+            placeholder_text="e.g. Kepler's Reach",
+            fg_color=("#ffffff", "#101010"),
+            border_color=("#a0a0a0", "#858585"),
+            text_color=TEXT,
+            placeholder_text_color=MUTED,
+        )
+        name_entry.pack(fill="x")
+        self._bind_shortcuts(name_entry)
+
+        ctk.CTkLabel(
+            content,
+            text="STELLAR TYPE",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=9, weight="bold"),
+        ).pack(anchor="w", pady=(14, 5))
+        star_type_list = ctk.CTkScrollableFrame(
+            content,
+            height=130,
+            fg_color=("#eeeeee", "#101010"),
+            scrollbar_button_color=GRID,
+            scrollbar_button_hover_color=ACCENT,
+        )
+        star_type_list.pack(fill="x")
+        for star_type_label in STAR_TYPE_LABELS:
+            ctk.CTkRadioButton(
+                star_type_list,
+                text=star_type_label,
+                variable=self.star_type_var,
+                value=star_type_label,
+                text_color=TEXT,
+                fg_color=ACCENT,
+                hover_color=("#505050", "#d0d0d0"),
+            ).pack(anchor="w", fill="x", padx=8, pady=4)
+
+        ctk.CTkLabel(
+            content,
+            text="POSITION  ·  LIGHT-YEARS",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=9, weight="bold"),
+        ).pack(anchor="w", pady=(16, 5))
+        coordinate_fields = ctk.CTkFrame(content, fg_color="transparent")
+        coordinate_fields.pack(fill="x")
+        self.coordinate_entries: dict[str, ctk.CTkEntry] = {}
+        for column, axis, variable in (
+            (0, "X", self.x_var),
+            (1, "Y", self.y_var),
+            (2, "Z", self.z_var),
+        ):
+            field = ctk.CTkFrame(coordinate_fields, fg_color="transparent")
+            field.grid(row=0, column=column, sticky="ew", padx=(0, 7))
+            coordinate_fields.grid_columnconfigure(column, weight=1)
+            ctk.CTkLabel(
+                field, text=axis, text_color=MUTED, font=ctk.CTkFont(size=10, weight="bold")
+            ).pack(anchor="w", pady=(0, 5))
+            entry = ctk.CTkEntry(
+                field,
+                textvariable=variable,
+                fg_color=("#ffffff", "#101010"),
+                border_color=("#a0a0a0", "#858585"),
+                text_color=TEXT,
+            )
+            entry.pack(fill="x")
+            self._bind_shortcuts(entry)
+            self.coordinate_entries[axis.lower()] = entry
+
+        ctk.CTkLabel(
+            content,
+            text="STABLE SYSTEM ID",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=9, weight="bold"),
+        ).pack(anchor="w", pady=(14, 5))
+        id_row = ctk.CTkFrame(content, fg_color="transparent")
+        id_row.pack(fill="x")
+        ctk.CTkEntry(
+            id_row,
+            textvariable=self.id_var,
+            state="readonly",
+            font=ctk.CTkFont(family="Consolas", size=10),
+            fg_color=("#eeeeee", "#101010"),
+            border_color=("#a0a0a0", "#858585"),
+            text_color=TEXT,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(
+            id_row,
+            text="Copy ID",
+            width=72,
+            fg_color=("#e5e5e5", "#242424"),
+            text_color=TEXT,
+            hover_color=("#d9d9d9", "#333333"),
+            command=self._copy_system_id,
+        ).pack(side="right")
+
+        reference_panel = ctk.CTkFrame(content, fg_color=("#eeeeee", "#101010"))
+        reference_panel.pack(fill="x", pady=(18, 12))
+        ctk.CTkLabel(
+            reference_panel,
+            text="NEAREST SYSTEMS",
+            text_color=TEXT,
+            font=ctk.CTkFont(size=10, weight="bold"),
+        ).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(
+            reference_panel,
+            text="Straight-line 3D distance from this position",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=9),
+        ).pack(anchor="w", padx=12, pady=(0, 5))
+        self.nearest_system_labels = []
+        for _index in range(4):
+            reference = ctk.CTkLabel(
+                reference_panel,
+                text="",
+                text_color=TEXT,
+                anchor="w",
+                font=ctk.CTkFont(size=10),
+            )
+            reference.pack(fill="x", padx=12, pady=2)
+            self.nearest_system_labels.append(reference)
+        ctk.CTkFrame(reference_panel, height=6, fg_color="transparent").pack()
+
+        actions = ctk.CTkFrame(content, fg_color="transparent")
+        actions.pack(fill="x", pady=(4, 0))
+        self.editor_save_button = ctk.CTkButton(
+            actions,
+            text="Save system  ·  Ctrl+S",
+            fg_color=ACCENT,
+            text_color=("#ffffff", "#071713"),
+            hover_color=("#505050", "#d0d0d0"),
+            command=self._save_system,
+        )
+        self.editor_save_button.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.delete_star_button = ctk.CTkButton(
+            actions,
+            text="Delete",
+            width=84,
+            fg_color=("#e5e5e5", "#2a2a2a"),
+            text_color=("#555555", "#c8c8c8"),
+            hover_color=("#d7d7d7", "#3a3a3a"),
+            command=self._delete_system,
+        )
+        self.delete_star_button.pack(side="right")
+
+        for variable in (self.x_var, self.y_var, self.z_var):
+            variable.trace_add("write", self._schedule_nearest_refresh)
+        self.save_toolbar_button.configure(state="normal")
+        self._update_star_editor_mode()
+        self._update_nearest_references()
+        name_entry.focus_set()
+
+    def _update_star_editor_mode(self) -> None:
+        if self.editor_panel is None or not self.editor_panel.winfo_exists():
+            return
+        if self.selected_system_id is None:
+            self.editor_title.configure(text="Add star system")
+            self.delete_star_button.configure(state="disabled")
+        else:
+            self.editor_title.configure(text="Edit star system")
+            self.delete_star_button.configure(state="normal")
+
+    def _schedule_nearest_refresh(self, *_args: str) -> None:
+        if self._nearest_refresh_after is not None:
+            try:
+                self.root.after_cancel(self._nearest_refresh_after)
+            except tk.TclError:
+                pass
+        self._nearest_refresh_after = self.root.after(
+            180, self._update_nearest_references
+        )
+
+    def _update_nearest_references(self) -> None:
+        self._nearest_refresh_after = None
+        if not self.nearest_system_labels:
+            return
+        valid_coordinates = True
+        try:
+            coordinates = tuple(
+                self._read_coordinate(variable, axis)
+                for variable, axis in (
+                    (self.x_var, "X"),
+                    (self.y_var, "Y"),
+                    (self.z_var, "Z"),
+                )
+            )
+        except ValueError:
+            valid_coordinates = False
+            results: list[tuple[dict[str, Any], float]] = []
+        else:
+            results = nearest_systems(
+                self.project_data["systems"],
+                coordinates,
+                exclude_id=self.selected_system_id,
+                limit=len(self.nearest_system_labels),
+            )
+        for index, label in enumerate(self.nearest_system_labels):
+            if index < len(results):
+                system, distance = results[index]
+                label.configure(
+                    text=f"{index + 1}.  {system['name']}  ·  {distance:,.0f} ly"
+                )
+            else:
+                label.configure(
+                    text=(
+                        "No other saved systems yet"
+                        if not self.project_data["systems"]
+                        else "Enter valid coordinates to compare"
+                        if not valid_coordinates
+                        else "—"
+                    )
+                )
+
+    def _close_star_editor(self) -> None:
+        if self._nearest_refresh_after is not None:
+            try:
+                self.root.after_cancel(self._nearest_refresh_after)
+            except tk.TclError:
+                pass
+            self._nearest_refresh_after = None
+        self.save_toolbar_button.configure(state="disabled")
+        if self.editor_panel is not None and self.editor_panel.winfo_exists():
+            self.workspace_body.forget(self.editor_panel)
+        self.selected_system_id = None
+        self.id_var.set("")
+        self._refresh_systems()
+        self._draw_grid()
+        self.status_var.set("Editor closed. Select a star to edit, or add one from the map.")
 
     def _load_startup_database(self) -> None:
         try:
@@ -849,12 +1219,12 @@ class PlanetDatabaseApp:
                 anchor="w",
                 height=48,
                 fg_color=(
-                    ("#c8dce4", "#12313b")
+                    ("#e0e0e0", "#303030")
                     if system_id == self.selected_system_id
-                    else ("#e4e9ef", "#101923")
+                    else ("#eeeeee", "#1a1a1a")
                 ),
                 text_color=TEXT,
-                hover_color=("#c3d5df", "#173441"),
+                hover_color=("#dddddd", "#2b2b2b"),
                 command=lambda selected_id=system_id: self._select_system_by_id(
                     selected_id
                 ),
@@ -888,12 +1258,16 @@ class PlanetDatabaseApp:
         self._focus_coordinates(system["x"], system["y"], system["z"], MAX_SPACING)
         self._refresh_systems()
         self._draw_grid()
+        self._open_star_editor()
+        self._update_star_editor_mode()
 
     def _on_canvas_select_click(self, event: tk.Event[tk.Canvas]) -> None:
         center_x, center_y = self._canvas_center()
         marker = self._nearest_system(event.x, event.y, center_x, center_y)
         if marker is not None:
             self._select_system(marker)
+        else:
+            self._close_star_editor()
 
     def _on_canvas_motion(self, event: tk.Event[tk.Canvas]) -> None:
         center_x, center_y = self._canvas_center()
@@ -935,10 +1309,11 @@ class PlanetDatabaseApp:
         self.name_var.set("")
         self.star_type_var.set(STAR_TYPES[DEFAULT_STAR_TYPE][0])
         self._refresh_systems()
+        self._open_star_editor()
         self.status_var.set(
-            f"Location selected at "
-            f"({location[0]:,}, {location[1]:,}, 0) light-years. Set Z and name it."
+            f"New star location: ({location[0]:,}, {location[1]:,}, 0) light-years."
         )
+        self._update_nearest_references()
         self._draw_grid()
 
     def _nearest_system(
@@ -974,6 +1349,13 @@ class PlanetDatabaseApp:
         return value
 
     def _save_system(self) -> None:
+        if (
+            self.editor_panel is None
+            or not self.editor_panel.winfo_exists()
+            or not self.editor_panel.winfo_manager()
+        ):
+            self.status_var.set("Open a star editor before saving.")
+            return
         name = self.name_var.get().strip()
         if not name or len(name) > 80:
             messagebox.showerror(
@@ -1059,6 +1441,8 @@ class PlanetDatabaseApp:
         self.id_var.set(updated["id"])
         self._focus_coordinates(x, y, z, MAX_SPACING)
         self._refresh_systems()
+        self._update_star_editor_mode()
+        self._update_nearest_references()
         self.status_var.set(
             f"Saved {name} at ({x:,}, {y:,}, {z:,}) light-years."
         )
@@ -1105,6 +1489,7 @@ class PlanetDatabaseApp:
         self.id_var.set("")
         self.name_var.set("")
         self.star_type_var.set(STAR_TYPES[DEFAULT_STAR_TYPE][0])
+        self._close_star_editor()
         self._refresh_systems()
         if self.project_data["systems"]:
             self._fit_database_view()
@@ -1118,8 +1503,20 @@ class PlanetDatabaseApp:
         self.id_var.set("")
         self.name_var.set("")
         self.star_type_var.set(STAR_TYPES[DEFAULT_STAR_TYPE][0])
+        center_x, center_y = self._canvas_center()
+        location = snap_to_grid(
+            max(self.canvas.winfo_width(), 2) / 2,
+            max(self.canvas.winfo_height(), 2) / 2,
+            center_x,
+            center_y,
+            self.spacing,
+        )
+        self.x_var.set(str(location[0] if location is not None else 0))
+        self.y_var.set(str(location[1] if location is not None else 0))
+        self.z_var.set("0")
         self._refresh_systems()
-        self.status_var.set("Choose X, Y, and Z in light-years for a new system.")
+        self._open_star_editor()
+        self.status_var.set("New star at the map center. Set its details and save.")
         self._draw_grid()
 
     def _copy_system_id(self) -> None:
@@ -1442,7 +1839,7 @@ class PlanetDatabaseApp:
                     screen_y,
                     origin_x + 3,
                     screen_y,
-                    fill="#496d80",
+                    fill=self._palette(ACCENT),
                 )
                 self.canvas.create_text(
                     origin_x + 7,
@@ -1762,6 +2159,31 @@ class PlanetDatabaseApp:
                 outline=outline,
                 width=1,
             )
+        elif shape == "trinary":
+            component_radius = radius / 2
+            component_positions = (
+                (screen_x - radius / 2, screen_y + radius / 3, fill),
+                (
+                    screen_x + radius / 2,
+                    screen_y + radius / 3,
+                    self._palette(STAR_TYPES["red_dwarf"][1]),
+                ),
+                (
+                    screen_x,
+                    screen_y - radius / 2,
+                    self._palette(STAR_TYPES["blue_giant"][1]),
+                ),
+            )
+            for component_x, component_y, component_color in component_positions:
+                self.canvas.create_oval(
+                    component_x - component_radius,
+                    component_y - component_radius,
+                    component_x + component_radius,
+                    component_y + component_radius,
+                    fill=component_color,
+                    outline=outline,
+                    width=1,
+                )
         else:
             self.canvas.create_oval(
                 screen_x - radius,
@@ -1855,8 +2277,8 @@ class PlanetDatabaseApp:
             width - 14,
             height - 12,
             text=(
-                "LEFT-CLICK SYSTEM TO EDIT  ·  RIGHT-CLICK TO PLACE  ·  "
-                "LEFT-DRAG TO PAN  ·  SCROLL TO ZOOM"
+                "CLICK STAR TO EDIT  ·  CLICK EMPTY MAP TO CLOSE  ·  "
+                "RIGHT-CLICK TO ADD  ·  DRAG TO PAN  ·  SCROLL TO ZOOM"
             ),
             fill=self._palette(MUTED),
             anchor="se",
@@ -1919,6 +2341,9 @@ class PlanetDatabaseApp:
         )
         apply_native_titlebar_theme(self.root, appearance == "Dark")
         self.canvas.configure(background=self.canvas_background)
+        self.workspace_body.configure(
+            background=_theme_color(APP_BACKGROUND, appearance == "Dark")
+        )
         self._draw_grid()
 
     def _poll_system_theme(self) -> None:
