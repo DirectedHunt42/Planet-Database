@@ -88,6 +88,13 @@ ApplicationWindow {
                     wrapMode: Text.WrapAnywhere
                     lineHeight: 1.25
                 }
+                Text {
+                    Layout.topMargin: 5
+                    text: "Last project folder is remembered in AppData."
+                    color: "#62798c"
+                    font.pixelSize: 9
+                    wrapMode: Text.WordWrap
+                }
                 Button {
                     Layout.fillWidth: true
                     Layout.topMargin: 14
@@ -149,7 +156,7 @@ ApplicationWindow {
                         Text {
                             text: galaxy.selectedStarIndex >= 0
                                   ? "STAR-" + ("0000000" + (galaxy.selectedStarIndex + 1)).slice(-7)
-                                  : "Click a star in the galaxy"
+                                  : "Click inside the cyan cube"
                             color: galaxy.selectedStarIndex >= 0 ? "#e5f3fa" : "#a1afbd"
                             font.pixelSize: 15
                             font.family: "Consolas"
@@ -157,7 +164,7 @@ ApplicationWindow {
                         Text {
                             text: galaxy.selectedStarIndex >= 0
                                   ? (projectStore.systems[galaxy.selectedStarIndex.toString()] || "Uncharted")
-                                  : "Drag to pan · scroll to zoom"
+                                  : "Left-drag orbit · right-drag move cube"
                             color: "#6cdded"
                             font.pixelSize: 11
                             elide: Text.ElideRight
@@ -244,7 +251,7 @@ ApplicationWindow {
                     font.letterSpacing: 0.6
                 }
                 Text {
-                    text: "Galaxy data stays in your chosen folder."
+                    text: "Galaxy and discoveries stay in your chosen folder."
                     color: "#607486"
                     font.pixelSize: 9
                 }
@@ -263,7 +270,7 @@ ApplicationWindow {
                 ColumnLayout {
                     spacing: 4
                     Text {
-                        text: "MILKY WAY  /  LOCAL VOLUME"
+                        text: "MILKY WAY  /  ACTIVE WORKING SECTOR"
                         color: "#6f879c"
                         font.pixelSize: 9
                         font.letterSpacing: 1.6
@@ -277,7 +284,7 @@ ApplicationWindow {
                 }
                 Item { Layout.fillWidth: true }
                 Rectangle {
-                    Layout.preferredWidth: 130
+                    Layout.preferredWidth: 128
                     Layout.preferredHeight: 44
                     radius: 7
                     color: "#0d1722"
@@ -287,7 +294,7 @@ ApplicationWindow {
                         spacing: 3
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            text: "STARS RENDERED"
+                            text: "GALAXY STARS"
                             color: "#71879a"
                             font.pixelSize: 8
                             font.letterSpacing: 0.8
@@ -302,7 +309,7 @@ ApplicationWindow {
                     }
                 }
                 Rectangle {
-                    Layout.preferredWidth: 98
+                    Layout.preferredWidth: 128
                     Layout.preferredHeight: 44
                     radius: 7
                     color: "#0d1722"
@@ -312,7 +319,57 @@ ApplicationWindow {
                         spacing: 3
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            text: "VIEW ZOOM"
+                            text: "CUBE · ~1/16 FACE"
+                            color: "#71879a"
+                            font.pixelSize: 8
+                            font.letterSpacing: 0.8
+                        }
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: galaxy.sectorSize.toFixed(2) + " | 1/4 WIDTH"
+                            color: "#c5e9f1"
+                            font.pixelSize: 12
+                            font.family: "Consolas"
+                        }
+                    }
+                }
+                Rectangle {
+                    Layout.preferredWidth: 156
+                    Layout.preferredHeight: 44
+                    radius: 7
+                    color: "#0d1722"
+                    border.color: "#1c2a38"
+                    Column {
+                        anchors.centerIn: parent
+                        spacing: 3
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: "WORKING CUBE CENTER"
+                            color: "#71879a"
+                            font.pixelSize: 8
+                            font.letterSpacing: 0.8
+                        }
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: galaxy.sectorCenter
+                            color: "#c5e9f1"
+                            font.pixelSize: 11
+                            font.family: "Consolas"
+                        }
+                    }
+                }
+                Rectangle {
+                    Layout.preferredWidth: 88
+                    Layout.preferredHeight: 44
+                    radius: 7
+                    color: "#0d1722"
+                    border.color: "#1c2a38"
+                    Column {
+                        anchors.centerIn: parent
+                        spacing: 3
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: "CAMERA ZOOM"
                             color: "#71879a"
                             font.pixelSize: 8
                             font.letterSpacing: 0.8
@@ -365,8 +422,8 @@ ApplicationWindow {
                             color: "#6de3f5"
                         }
                         Text {
-                            text: "PROCEDURAL STARFIELD"
-                            color: "#91a4b4"
+                            text: "FULL GALAXY · CYAN CUBE IS EDITABLE"
+                            color: "#a9eaf4"
                             font.pixelSize: 8
                             font.letterSpacing: 1
                         }
@@ -377,7 +434,7 @@ ApplicationWindow {
                     anchors.right: parent.right
                     anchors.bottom: parent.bottom
                     anchors.margins: 18
-                    text: "DRAG TO PAN     ·     SCROLL TO ZOOM     ·     CLICK A STAR"
+                    text: "LEFT-DRAG TO ORBIT     ·     RIGHT-DRAG TO MOVE SECTOR     ·     SCROLL TO ZOOM     ·     CLICK INSIDE CUBE"
                     color: "#728496"
                     font.pixelSize: 9
                     font.letterSpacing: 0.6

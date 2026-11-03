@@ -32,11 +32,15 @@ signals:
     void lastErrorChanged();
 
 private:
+    bool openProjectFolder(const QString &path);
+    void rememberProjectFolder(const QString &path);
+    void clearRememberedProjectFolder();
     bool writeProject(const QString &path, quint64 seed,
                       const QHash<int, QString> &systems);
     void setError(const QString &message);
 
     QString projectDirectory_;
+    QString settingsFilePath_;
     QString lastError_;
     quint64 seed_ = 1;
     int starCount_ = 1000000;

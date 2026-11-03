@@ -7,8 +7,10 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRandomGenerator>
+#include <QSettings>
 #include <QSaveFile>
 #include <QByteArray>
+#include <QStandardPaths>
 
 namespace {
 
@@ -22,6 +24,38 @@ ProjectStore::ProjectStore(QObject *parent)
     : QObject(parent),
       seed_(QRandomGenerator::global()->generate64())
 {
+    const QString appDataPath =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (appDataPath.isEmpty()) {
+        setError(QStringLiteral("Could not locate the application data folder."));
+        return;
+    }
+
+    QDir appDataDirectory(appDataPath);
+    if (!appDataDirectory.mkpath(QStringLiteral("."))) {
+        setError(QStringLiteral("Could not create the application data folder: %1")
+                     .arg(appDataPath));
+        return;
+    }
+    settingsFilePath_ = appDataDirectory.filePath(QStringLiteral("settings.ini"));
+
+    QSettings settings(settingsFilePath_, QSettings::IniFormat);
+    const QString savedPath = settings.value(QStringLiteral("project/directory")).toString();
+    if (settings.status() != QSettings::NoError) {
+        setError(QStringLiteral("Could not read the saved project folder from AppData."));
+        return;
+    }
+    if (savedPath.isEmpty())
+        return;
+
+    if (!QDir(savedPath).exists()) {
+        clearRememberedProjectFolder();
+        setError(QStringLiteral("The saved project folder is unavailable. Choose it again."));
+        return;
+    }
+
+    if (!openProjectFolder(savedPath))
+        clearRememberedProjectFolder();
 }
 
 QString ProjectStore::projectDirectory() const
@@ -61,22 +95,27 @@ void ProjectStore::chooseProjectFolder()
     if (selectedPath.isEmpty())
         return;
 
-    const QString filePath = QDir(selectedPath).filePath(projectFileName);
-    quint64 candidateSeed = seed_;
+    openProjectFolder(selectedPath);
+}
+
+bool ProjectStore::openProjectFolder(const QString &path)
+{
+    const QString filePath = QDir(path).filePath(projectFileName);
+    quint64 candidateSeed = QRandomGenerator::global()->generate64();
     QHash<int, QString> candidateSystems;
 
     if (QFile::exists(filePath)) {
         QFile file(filePath);
         if (!file.open(QIODevice::ReadOnly)) {
             setError(QStringLiteral("Could not read the project file: %1").arg(file.errorString()));
-            return;
+            return false;
         }
 
         QJsonParseError parseError;
         const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
         if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
             setError(QStringLiteral("The project file is invalid JSON."));
-            return;
+            return false;
         }
 
         const QJsonObject root = document.object();
@@ -87,14 +126,14 @@ void ProjectStore::chooseProjectFolder()
             || !seedValid
             || !root.value(QStringLiteral("systems")).isArray()) {
             setError(QStringLiteral("This folder contains an unsupported or incomplete project."));
-            return;
+            return false;
         }
 
         const QJsonArray systems = root.value(QStringLiteral("systems")).toArray();
         for (const QJsonValue &value : systems) {
             if (!value.isObject()) {
                 setError(QStringLiteral("The project contains an invalid system entry."));
-                return;
+                return false;
             }
             const QJsonObject system = value.toObject();
             const int starIndex = system.value(QStringLiteral("starIndex")).toInt(-1);
@@ -103,21 +142,49 @@ void ProjectStore::chooseProjectFolder()
                 || name.size() > 80
                 || candidateSystems.contains(starIndex)) {
                 setError(QStringLiteral("The project contains an invalid or duplicate system."));
-                return;
+                return false;
             }
             candidateSystems.insert(starIndex, name);
         }
     } else if (!writeProject(filePath, candidateSeed, candidateSystems)) {
-        return;
+        return false;
     }
 
-    projectDirectory_ = selectedPath;
+    projectDirectory_ = path;
     seed_ = candidateSeed;
     starCount_ = galaxyStarCount;
     systems_ = candidateSystems;
     setError(QString());
     emit projectDirectoryChanged();
     emit projectDataChanged();
+    rememberProjectFolder(path);
+    return true;
+}
+
+void ProjectStore::rememberProjectFolder(const QString &path)
+{
+    if (settingsFilePath_.isEmpty()) {
+        setError(QStringLiteral("The project is open, but its folder could not be remembered."));
+        return;
+    }
+
+    QSettings settings(settingsFilePath_, QSettings::IniFormat);
+    settings.setValue(QStringLiteral("project/directory"), path);
+    settings.sync();
+    if (settings.status() != QSettings::NoError)
+        setError(QStringLiteral("The project is open, but its folder could not be remembered."));
+}
+
+void ProjectStore::clearRememberedProjectFolder()
+{
+    if (settingsFilePath_.isEmpty())
+        return;
+
+    QSettings settings(settingsFilePath_, QSettings::IniFormat);
+    settings.remove(QStringLiteral("project/directory"));
+    settings.sync();
+    if (settings.status() != QSettings::NoError)
+        setError(QStringLiteral("Could not update the saved project folder."));
 }
 
 bool ProjectStore::addSystem(int starIndex, const QString &name)
