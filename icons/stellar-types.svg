@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="540" viewBox="0 0 900 540">
+  <rect width="900" height="540" rx="18" fill="#0b111b"/>
+  <g font-family="Segoe UI, Arial, sans-serif" font-size="16" fill="#e3edf5">
+    <g transform="translate(24 28)">
+      <circle cx="18" cy="18" r="7" fill="#f6c94b"/><text x="42" y="24">Yellow dwarf</text>
+    </g>
+    <g transform="translate(244 28)">
+      <circle cx="18" cy="18" r="6" fill="#e05c52"/><text x="42" y="24">Red dwarf</text>
+    </g>
+    <g transform="translate(464 28)">
+      <circle cx="18" cy="18" r="7" fill="#ee9147"/><text x="42" y="24">Orange dwarf</text>
+    </g>
+    <g transform="translate(684 28)">
+      <circle cx="18" cy="18" r="6" fill="#a96f58"/><text x="42" y="24">Brown dwarf</text>
+    </g>
+    <g transform="translate(24 88)">
+      <circle cx="18" cy="18" r="7" fill="none" stroke="#f3f5ff" stroke-width="2"/><circle cx="18" cy="18" r="2" fill="#f3f5ff"/><text x="42" y="24">White dwarf</text>
+    </g>
+    <g transform="translate(244 88)">
+      <circle cx="18" cy="18" r="10" fill="#e45845"/><text x="42" y="24">Red giant</text>
+    </g>
+    <g transform="translate(464 88)">
+      <circle cx="18" cy="18" r="10" fill="#f08c3d"/><text x="42" y="24">Orange giant</text>
+    </g>
+    <g transform="translate(684 88)">
+      <circle cx="18" cy="18" r="10" fill="#68aaff"/><text x="42" y="24">Blue giant</text>
+    </g>
+    <g transform="translate(24 148)">
+      <circle cx="18" cy="18" r="8" fill="#eaf7ff"/><text x="42" y="24">White star</text>
+    </g>
+    <g transform="translate(244 148)">
+      <path d="M10 10l16 16M26 10L10 26" stroke="#e98cff" stroke-width="3" stroke-linecap="round"/><circle cx="18" cy="18" r="2" fill="#e98cff"/><text x="42" y="24">Wolf–Rayet</text>
+    </g>
+    <g transform="translate(464 148)">
+      <path d="M18 7l11 11-11 11L7 18Z" fill="#80eaff"/><text x="42" y="24">Neutron star</text>
+    </g>
+    <g transform="translate(684 148)">
+      <path d="M5 18h26M18 5v26" stroke="#55ddff" stroke-width="2"/><circle cx="18" cy="18" r="7" fill="#55ddff"/><circle cx="18" cy="18" r="2" fill="#0b111b"/><text x="42" y="24">Pulsar</text>
+    </g>
+    <g transform="translate(24 208)">
+      <circle cx="18" cy="18" r="11" fill="none" stroke="#bb91ff" stroke-width="2"/><circle cx="18" cy="18" r="5" fill="#05070b"/><text x="42" y="24">Black hole</text>
+    </g>
+    <g transform="translate(244 208)">
+      <circle cx="14" cy="18" r="7" fill="#ffd56a"/><circle cx="25" cy="18" r="7" fill="#68aaff"/><text x="42" y="24">Binary star</text>
+    </g>
+  </g>
+</svg>
