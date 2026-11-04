@@ -6,6 +6,7 @@ import heapq
 import json
 import math
 import os
+import sys
 import tempfile
 import tkinter as tk
 import uuid
@@ -21,7 +22,7 @@ import darkdetect
 
 
 APP_NAME = "Planet Database"
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.11.1"
 APP_ICON_PATH = Path(__file__).with_name("icons") / "planet-database.ico"
 DATABASE_FILENAME = "planet-systems.json"
 APP_SETTINGS_FILENAME = "app-settings.json"
@@ -736,6 +737,7 @@ class PlanetDatabaseApp:
         self.editor_content: ctk.CTkScrollableFrame | None = None
         self.editor_header: ctk.CTkFrame | None = None
         self.notes_panel: ctk.CTkFrame | None = None
+        self.nearest_reference_panel: ctk.CTkFrame | None = None
         self._editor_pack_info: dict[tk.Widget, dict[str, Any]] = {}
         self._scrollable_frames: list[ctk.CTkScrollableFrame] = []
         self._notes_view = False
@@ -919,7 +921,7 @@ class PlanetDatabaseApp:
         ).pack(fill="x", padx=16, pady=(16, 4))
         ctk.CTkLabel(
             sidebar,
-            text="Select a system to focus it and open its editor.",
+            text="Left-click to view saved notes; right-click to edit a system.",
             text_color=MUTED,
             font=ctk.CTkFont(size=10),
             wraplength=270,
@@ -941,6 +943,7 @@ class PlanetDatabaseApp:
         self._scrollable_frames.append(self.system_list)
         self._bind_panel_mouse_wheel_tree(self.system_list)
         self.system_list.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self._expand_scrollable_frame_to_viewport(self.system_list)
         self.system_rows: dict[str, ctk.CTkButton] = {}
 
         map_panel = ctk.CTkFrame(body, corner_radius=10, fg_color=PANEL)
@@ -1019,6 +1022,7 @@ class PlanetDatabaseApp:
         self.editor_content = content
         self._scrollable_frames.append(content)
         content.pack(fill="both", expand=True, padx=12, pady=10)
+        self._expand_scrollable_frame_to_viewport(content)
         header = ctk.CTkFrame(content, fg_color="transparent")
         self.editor_header = header
         header.pack(fill="x", pady=(0, 14))
@@ -1174,6 +1178,7 @@ class PlanetDatabaseApp:
         self.notes_text.bind("<Control-y>", self._on_shortcut_redo)
 
         reference_panel = ctk.CTkFrame(content, fg_color=("#eeeeee", "#101010"))
+        self.nearest_reference_panel = reference_panel
         reference_panel.pack(fill="x", pady=(18, 12))
         ctk.CTkLabel(
             reference_panel,
@@ -1250,7 +1255,11 @@ class PlanetDatabaseApp:
             )
 
     def _show_notes_view(self) -> None:
-        if self.editor_content is None or self.notes_panel is None:
+        if (
+            self.editor_content is None
+            or self.notes_panel is None
+            or self.nearest_reference_panel is None
+        ):
             return
         self._notes_view = True
         for widget in self.editor_content.winfo_children():
@@ -1258,6 +1267,7 @@ class PlanetDatabaseApp:
         self.editor_header.pack(fill="x", pady=(0, 14))
         self.notes_panel.pack(fill="both", expand=True, pady=(18, 12))
         self.notes_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.nearest_reference_panel.pack(fill="x", pady=(0, 12))
         self.notes_text.configure(state="disabled")
         self._update_star_editor_mode()
 
@@ -1477,7 +1487,7 @@ class PlanetDatabaseApp:
         center_x, center_y = self._canvas_center()
         marker = self._nearest_system(event.x, event.y, center_x, center_y)
         if marker is not None:
-            self._select_system(marker)
+            self._select_system(marker, show_notes_only=True)
         else:
             self._close_star_editor()
 
@@ -1792,16 +1802,18 @@ class PlanetDatabaseApp:
             return
         self.status_var.set(f"Project exported to {archive_path}")
 
-    def _import_project(self) -> None:
-        archive_path = filedialog.askopenfilename(
-            parent=self.root,
-            title="Import Planet Database",
-            filetypes=(("Planet Database project", "*.planetdata"),),
-        )
-        if not archive_path:
-            return
+    def _import_project(self, archive_path: Path | None = None) -> None:
+        if archive_path is None:
+            selected_path = filedialog.askopenfilename(
+                parent=self.root,
+                title="Import Planet Database",
+                filetypes=(("Planet Database project", "*.planetdata"),),
+            )
+            if not selected_path:
+                return
+            archive_path = Path(selected_path)
         try:
-            imported_data = load_project_archive(Path(archive_path))
+            imported_data = load_project_archive(archive_path)
         except (OSError, ValueError) as exc:
             messagebox.showerror("Could not import project", str(exc), parent=self.root)
             self.status_var.set(f"Could not import project: {exc}")
@@ -1845,7 +1857,7 @@ class PlanetDatabaseApp:
         else:
             self._draw_grid()
         self.status_var.set(
-            f"Imported {imported_count} systems from {Path(archive_path).name}."
+            f"Imported {imported_count} systems from {archive_path.name}."
         )
 
     def _focus_coordinates(
@@ -2587,7 +2599,8 @@ class PlanetDatabaseApp:
             width - 14,
             height - 12,
             text=(
-                "CLICK STAR TO EDIT  ·  RIGHT-CLICK TO ADD  ·  "
+                "LEFT-CLICK STAR TO VIEW NOTES  ·  RIGHT-CLICK STAR TO EDIT  ·  "
+                "RIGHT-CLICK TO ADD  ·  "
                 "LEFT-DRAG TO PAN  ·  MIDDLE-DRAG TO ROTATE  ·  SCROLL TO ZOOM"
             ),
             fill=self._palette(MUTED),
@@ -2741,6 +2754,22 @@ class PlanetDatabaseApp:
         for child in widget.winfo_children():
             self._bind_panel_mouse_wheel_tree(child)
 
+    def _expand_scrollable_frame_to_viewport(
+        self, frame: ctk.CTkScrollableFrame
+    ) -> None:
+        def fit_to_viewport(_event: tk.Event[tk.Misc] | None = None) -> None:
+            frame._parent_canvas.itemconfigure(
+                frame._create_window_id,
+                height=max(
+                    frame.winfo_reqheight(),
+                    frame._parent_canvas.winfo_height(),
+                ),
+            )
+
+        frame._parent_canvas.bind("<Configure>", fit_to_viewport, add="+")
+        frame.bind("<Configure>", fit_to_viewport, add="+")
+        frame.after_idle(fit_to_viewport)
+
     def _on_panel_mouse_wheel(
         self, event: tk.Event[tk.Misc], *, direction: int | None = None
     ) -> str | None:
@@ -2814,7 +2843,10 @@ def main() -> None:
     ctk.set_appearance_mode("system")
     ctk.set_default_color_theme("dark-blue")
     root = ctk.CTk()
-    PlanetDatabaseApp(root)
+    app = PlanetDatabaseApp(root)
+    if len(sys.argv) > 1:
+        archive_path = Path(sys.argv[1])
+        root.after(100, lambda: app._import_project(archive_path))
     root.mainloop()
 
 

@@ -1,5 +1,7 @@
 param(
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+    [string]$InnoSetupCompiler,
+    [switch]$SkipInstaller
 )
 
 $ErrorActionPreference = "Stop"
@@ -7,6 +9,10 @@ $ErrorActionPreference = "Stop"
 $projectRoot = $PSScriptRoot
 $mainScript = Join-Path $projectRoot "main.py"
 $iconPath = Join-Path $projectRoot "icons\planet-database.ico"
+$projectFileIconPath = Join-Path $projectRoot "icons\planetdata-file-icon.ico"
+$licensePath = Join-Path $projectRoot "LICENSE.txt"
+$setupScript = Join-Path $projectRoot "Setup.iss"
+$installerIconPath = Join-Path $projectRoot "icons\Installer.ico"
 
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $downloadsDirectory = Join-Path $env:USERPROFILE "Downloads"
@@ -21,6 +27,44 @@ if (-not (Test-Path -LiteralPath $mainScript -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $iconPath -PathType Leaf)) {
     throw "Application icon was not found: $iconPath"
+}
+if (-not (Test-Path -LiteralPath $projectFileIconPath -PathType Leaf)) {
+    throw "Project file icon was not found: $projectFileIconPath"
+}
+if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) {
+    throw "License file was not found: $licensePath"
+}
+if (-not $SkipInstaller) {
+    if (-not (Test-Path -LiteralPath $setupScript -PathType Leaf)) {
+        throw "Inno Setup script was not found: $setupScript"
+    }
+    if (-not (Test-Path -LiteralPath $installerIconPath -PathType Leaf)) {
+        throw "Installer icon was not found: $installerIconPath"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($InnoSetupCompiler)) {
+        $compilerCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+        if ($null -ne $compilerCommand) {
+            $InnoSetupCompiler = $compilerCommand.Source
+        } else {
+            $compilerCandidates = @(
+                "D:\Inno Setup 7\ISCC.exe",
+                (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 7\ISCC.exe"),
+                (Join-Path $env:ProgramFiles "Inno Setup 7\ISCC.exe"),
+                (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+                (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+            )
+            $InnoSetupCompiler = $compilerCandidates |
+                Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+                Select-Object -First 1
+        }
+    }
+    if (
+        [string]::IsNullOrWhiteSpace($InnoSetupCompiler) -or
+        -not (Test-Path -LiteralPath $InnoSetupCompiler -PathType Leaf)
+    ) {
+        throw "Inno Setup compiler (ISCC.exe) was not found. Install Inno Setup 7 or 6, or pass -InnoSetupCompiler; use -SkipInstaller to build only the standalone app."
+    }
 }
 if (Test-Path -LiteralPath $OutputDirectory) {
     throw "Output folder already exists; move or rename it before building: $OutputDirectory"
@@ -89,12 +133,27 @@ try {
         -Destination $stagingDirectory -Recurse
 
     $stagedIcon = Join-Path $stagingDirectory "icons\planet-database.ico"
+    $stagedProjectFileIcon = Join-Path $stagingDirectory "icons\planetdata-file-icon.ico"
     $null = New-Item -ItemType Directory -Path (Split-Path -Parent $stagedIcon) -Force
     Copy-Item -LiteralPath $iconPath -Destination $stagedIcon -Force
+    Copy-Item -LiteralPath $projectFileIconPath -Destination $stagedProjectFileIcon -Force
+    Copy-Item -LiteralPath $licensePath -Destination (Join-Path $stagingDirectory "LICENSE.txt") -Force
 
     Move-Item -LiteralPath $stagingDirectory -Destination $OutputDirectory
     Write-Host "Build complete: $OutputDirectory"
     Write-Host "Run: $(Join-Path $OutputDirectory 'PlanetDatabase.exe')"
+
+    if (-not $SkipInstaller) {
+        $installerArguments = @(
+            "/DBuildOutputDir=`"$OutputDirectory`""
+            $setupScript
+        )
+        & $InnoSetupCompiler @installerArguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
+        }
+        Write-Host "Installer compilation complete."
+    }
 }
 finally {
     if (Test-Path -LiteralPath $buildDirectory) {

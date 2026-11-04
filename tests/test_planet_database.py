@@ -395,6 +395,49 @@ class DatabaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must contain only"):
                 load_project_archive(path)
 
+    def test_import_project_accepts_a_file_association_path(self) -> None:
+        imported_project = {
+            "formatVersion": 2,
+            "coordinateUnit": "light-years",
+            "systems": [
+                {"id": "imported", "name": "Imported", "x": 1, "y": 2, "z": 3}
+            ],
+        }
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        app.root = Mock()
+        app.project_data = empty_project()
+        app.data_path = Path("planet-systems.json")
+        app._undo_history = []
+        app._redo_history = []
+        app._history_limit = 100
+        app.id_var = SimpleNamespace(set=Mock())
+        app.name_var = SimpleNamespace(set=Mock())
+        app.star_type_var = SimpleNamespace(set=Mock())
+        app.x_var = SimpleNamespace(set=Mock())
+        app.y_var = SimpleNamespace(set=Mock())
+        app.z_var = SimpleNamespace(set=Mock())
+        app.status_var = SimpleNamespace(set=Mock())
+        app._refresh_systems = Mock()
+        app._fit_database_view = Mock()
+        app._draw_grid = Mock()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            archive_path = Path(temporary_directory) / "import.planetdata"
+            export_project_archive(archive_path, imported_project)
+            with (
+                patch("main.messagebox.askyesno", return_value=True),
+                patch("main.atomic_write_json") as write_database,
+                patch("main.filedialog.askopenfilename") as choose_file,
+            ):
+                app._import_project(archive_path)
+
+        self.assertEqual(app.project_data, imported_project)
+        write_database.assert_called_once_with(app.data_path, imported_project)
+        choose_file.assert_not_called()
+        app.status_var.set.assert_called_once_with(
+            "Imported 1 systems from import.planetdata."
+        )
+
 
 class InfiniteLightyearGridTests(unittest.TestCase):
     def test_isometric_round_trip_snaps_beyond_the_initial_view(self) -> None:
@@ -478,6 +521,89 @@ class InfiniteLightyearGridTests(unittest.TestCase):
 
         app._select_system.assert_called_once_with(system, show_notes_only=False)
         self.assertEqual(result, "break")
+
+    def test_left_clicking_a_map_star_opens_read_only_notes(self) -> None:
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        system = {"id": "star", "name": "Star", "notes": "A quiet system."}
+        app._canvas_center = Mock(return_value=(300.0, 200.0))
+        app._nearest_system = Mock(return_value=system)
+        app._select_system = Mock()
+
+        app._on_canvas_select_click(SimpleNamespace(x=100, y=150))
+
+        app._select_system.assert_called_once_with(system, show_notes_only=True)
+
+    def test_notes_view_shows_nearest_systems_with_saved_notes(self) -> None:
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        app.editor_content = SimpleNamespace(winfo_children=Mock(return_value=[]))
+        app.editor_header = SimpleNamespace(pack=Mock())
+        app.notes_panel = SimpleNamespace(pack=Mock())
+        app.notes_text = SimpleNamespace(pack=Mock(), configure=Mock())
+        app.nearest_reference_panel = SimpleNamespace(pack=Mock())
+        app._update_star_editor_mode = Mock()
+
+        app._show_notes_view()
+
+        app.notes_panel.pack.assert_called_once_with(
+            fill="both", expand=True, pady=(18, 12)
+        )
+        app.nearest_reference_panel.pack.assert_called_once_with(
+            fill="x", pady=(0, 12)
+        )
+        app.notes_text.configure.assert_called_once_with(state="disabled")
+
+    def test_scrollable_panel_fills_viewport_and_grows_with_content(self) -> None:
+        class FakeCanvas:
+            def __init__(self):
+                self.height = 120
+                self.configured_heights = []
+                self.bindings = {}
+
+            def bind(self, event_name, callback, add=None):
+                self.bindings[event_name] = callback
+
+            def winfo_height(self):
+                return self.height
+
+            def itemconfigure(self, _item_id, *, height):
+                self.configured_heights.append(height)
+
+        class FakeScrollable:
+            def __init__(self):
+                self._parent_canvas = FakeCanvas()
+                self._create_window_id = 1
+                self.requested_height = 80
+                self.bindings = {}
+
+            def winfo_reqheight(self):
+                return self.requested_height
+
+            def bind(self, event_name, callback, add=None):
+                self.bindings[event_name] = callback
+
+            @staticmethod
+            def after_idle(callback):
+                callback()
+
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        panel = FakeScrollable()
+
+        app._expand_scrollable_frame_to_viewport(panel)
+        panel.requested_height = 180
+        panel.bindings["<Configure>"](None)
+
+        self.assertEqual(panel._parent_canvas.configured_heights, [120, 180])
+
+    def test_right_clicking_a_map_star_opens_the_editor(self) -> None:
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        system = {"id": "star", "name": "Star", "notes": "A quiet system."}
+        app._canvas_center = Mock(return_value=(300.0, 200.0))
+        app._nearest_system = Mock(return_value=system)
+        app._select_system = Mock()
+
+        app._on_canvas_click(SimpleNamespace(x=100, y=150))
+
+        app._select_system.assert_called_once_with(system)
 
     def test_panel_mouse_wheel_scrolls_only_the_nearest_nested_frame(self) -> None:
         class FakeCanvas:
