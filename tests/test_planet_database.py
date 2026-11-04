@@ -12,8 +12,12 @@ from unittest.mock import Mock, patch
 from main import (
     APP_SETTINGS_FILENAME,
     DATABASE_FILENAME,
+    DEFAULT_CAMERA_ELEVATION,
+    DEFAULT_CAMERA_YAW,
     LIGHTYEARS_PER_GRID_STEP,
+    MAX_CAMERA_ELEVATION,
     MAX_SPACING,
+    MIN_CAMERA_ELEVATION,
     MIN_SPACING,
     MUTED,
     PlanetDatabaseApp,
@@ -27,6 +31,7 @@ from main import (
     fit_view_to_systems,
     find_system_by_id,
     grid_dash_pattern,
+    grid_display_interval_lightyears,
     grid_interval_lightyears,
     grid_subdivision_factor,
     is_coordinate,
@@ -36,7 +41,9 @@ from main import (
     load_project_archive,
     nearest_systems,
     pan_to_center_coordinates,
+    project_3d,
     project_isometric,
+    screen_to_ground_units,
     snap_to_grid,
     _parse_database_contents,
     viewport_ground_bounds,
@@ -424,6 +431,43 @@ class InfiniteLightyearGridTests(unittest.TestCase):
         )
         self.assertEqual(1_000 % grid_interval_lightyears(MAX_SPACING), 0)
 
+    def test_visible_grid_interval_is_double_placement_interval(self) -> None:
+        for zoom in (16, 32, 64, 128, 512, MAX_SPACING):
+            with self.subTest(zoom=zoom):
+                self.assertEqual(
+                    grid_display_interval_lightyears(zoom),
+                    2 * grid_interval_lightyears(zoom),
+                )
+
+    def test_grid_renderer_draws_every_other_subdivision(self) -> None:
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        app.canvas = Mock()
+        app.canvas.winfo_width.return_value = 800
+        app.canvas.winfo_height.return_value = 600
+        app.spacing = 64.0
+        app.pan_x = 0.0
+        app.pan_y = 0.0
+        app._hover_label_bounds = None
+        app._palette = lambda color: color
+        app._draw_axis_z = Mock()
+        app._draw_axis_labels = Mock()
+        app._draw_systems = Mock()
+        app._draw_canvas_legend = Mock()
+        center = app._canvas_center()
+        subdivision_factor = grid_subdivision_factor(app.spacing)
+        bounds = viewport_ground_bounds(
+            800, 600, *center, app.spacing, subdivision_factor
+        )
+        expected_line_count = sum(
+            1 for index in range(bounds[0], bounds[1] + 1) if index % 2 == 0
+        ) + sum(
+            1 for index in range(bounds[2], bounds[3] + 1) if index % 2 == 0
+        )
+
+        app._draw_grid()
+
+        self.assertEqual(app.canvas.create_line.call_count, expected_line_count)
+
     def test_catalog_context_click_opens_the_full_system_editor(self) -> None:
         app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
         system = {"id": "star", "name": "Star", "notes": "A quiet system."}
@@ -647,6 +691,209 @@ class InfiniteLightyearGridTests(unittest.TestCase):
         )
 
         self.assertEqual(spacing, MAX_SPACING)
+
+
+class ThreeDimensionalCameraTests(unittest.TestCase):
+    def test_default_camera_preserves_the_previous_isometric_projection(self) -> None:
+        coordinates = (125_000, -80_000, 12_500)
+        expected = project_isometric(*coordinates, 580, 380, 28)
+        actual = project_3d(
+            *coordinates,
+            580,
+            380,
+            28,
+            DEFAULT_CAMERA_YAW,
+            DEFAULT_CAMERA_ELEVATION,
+        )[:2]
+
+        self.assertAlmostEqual(actual[0], expected[0])
+        self.assertAlmostEqual(actual[1], expected[1])
+
+    def test_map_surfaces_render_after_camera_rotation(self) -> None:
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        app.canvas = Mock()
+        app.canvas.winfo_width.return_value = 800
+        app.canvas.winfo_height.return_value = 600
+        app.canvas.bbox.return_value = None
+        app.spacing = 32.0
+        app.camera_yaw = 0.75
+        app.camera_elevation = math.radians(52)
+        app.pan_x = 0.0
+        app.pan_y = 0.0
+        app.project_data = {
+            "systems": [
+                {
+                    "id": "rendered",
+                    "name": "Rendered system",
+                    "x": 1_000,
+                    "y": -2_000,
+                    "z": 500,
+                    "starType": "yellow_dwarf",
+                }
+            ]
+        }
+        app.selected_system_id = None
+        app._is_adding_system = False
+        app._hovered_system_id = None
+        app._hover_label_bounds = None
+        app.canvas_background = "#000000"
+        app._palette = lambda color: color
+
+        app._draw_grid()
+
+        self.assertTrue(app.canvas.create_line.called)
+        self.assertTrue(app.canvas.create_oval.called)
+        self.assertTrue(app.canvas.create_text.called)
+
+    def test_ground_projection_round_trips_at_multiple_camera_angles(self) -> None:
+        expected = (125_000.0, -80_000.0)
+        for yaw, elevation in (
+            (DEFAULT_CAMERA_YAW, DEFAULT_CAMERA_ELEVATION),
+            (0.25, MIN_CAMERA_ELEVATION),
+            (1.7, math.radians(42)),
+            (-2.4, MAX_CAMERA_ELEVATION),
+        ):
+            with self.subTest(yaw=yaw, elevation=elevation):
+                position = project_3d(
+                    *expected,
+                    0,
+                    580.0,
+                    380.0,
+                    28.0,
+                    yaw,
+                    elevation,
+                )
+                ground = screen_to_ground_units(
+                    position[0],
+                    position[1],
+                    580.0,
+                    380.0,
+                    28.0,
+                    yaw,
+                    elevation,
+                )
+
+                self.assertAlmostEqual(
+                    ground[0] * LIGHTYEARS_PER_GRID_STEP, expected[0]
+                )
+                self.assertAlmostEqual(
+                    ground[1] * LIGHTYEARS_PER_GRID_STEP, expected[1]
+                )
+
+    def test_vertical_axis_stays_screen_vertical_as_camera_rotates(self) -> None:
+        ground = project_3d(4_000, -2_000, 0, 100, 200, 32, 0.9, 0.6)
+        elevated = project_3d(4_000, -2_000, 3_000, 100, 200, 32, 0.9, 0.6)
+
+        self.assertAlmostEqual(elevated[0], ground[0])
+        expected_height = -96.0 * (
+            math.cos(0.6) / math.cos(DEFAULT_CAMERA_ELEVATION)
+        )
+        self.assertAlmostEqual(elevated[1] - ground[1], expected_height)
+
+    def test_grid_snapping_follows_the_rotated_ground_plane(self) -> None:
+        expected = (125_000, -80_000)
+        yaw = 1.2
+        elevation = math.radians(24)
+        screen_position = project_3d(
+            *expected,
+            0,
+            580,
+            380,
+            64,
+            yaw,
+            elevation,
+        )[:2]
+
+        self.assertEqual(
+            snap_to_grid(*screen_position, 580, 380, 64, yaw, elevation),
+            expected,
+        )
+
+    def test_middle_drag_keeps_nearest_stars_ground_point_fixed(self) -> None:
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        app.canvas = SimpleNamespace(
+            winfo_width=Mock(return_value=1000),
+            winfo_height=Mock(return_value=700),
+        )
+        app.spacing = 32.0
+        app.camera_yaw = DEFAULT_CAMERA_YAW
+        app.camera_elevation = DEFAULT_CAMERA_ELEVATION
+        app.pan_x = 140.0
+        app.pan_y = -90.0
+        app.project_data = {
+            "systems": [{"id": "pivot", "x": 50_000, "y": -30_000, "z": 4_000}]
+        }
+        app._draw_grid = Mock()
+
+        initial_center = app._canvas_center()
+        pivot_screen = project_3d(
+            50_000,
+            -30_000,
+            0,
+            *initial_center,
+            app.spacing,
+            app.camera_yaw,
+            app.camera_elevation,
+        )[:2]
+        app._start_rotate(SimpleNamespace(x=100, y=100))
+        app._move_rotate(SimpleNamespace(x=160, y=145))
+
+        rotated_center = app._canvas_center()
+        rotated_pivot_screen = project_3d(
+            50_000,
+            -30_000,
+            0,
+            *rotated_center,
+            app.spacing,
+            app.camera_yaw,
+            app.camera_elevation,
+        )[:2]
+
+        self.assertAlmostEqual(rotated_pivot_screen[0], pivot_screen[0])
+        self.assertAlmostEqual(rotated_pivot_screen[1], pivot_screen[1])
+        self.assertNotEqual(app.camera_yaw, DEFAULT_CAMERA_YAW)
+        self.assertNotEqual(app.camera_elevation, DEFAULT_CAMERA_ELEVATION)
+        app._end_rotate(SimpleNamespace())
+        self.assertIsNone(app._rotation_origin)
+
+    def test_zoom_stays_anchored_to_the_ground_point_under_the_cursor(self) -> None:
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        app.canvas = SimpleNamespace(
+            winfo_width=Mock(return_value=1000),
+            winfo_height=Mock(return_value=700),
+        )
+        app.spacing = 32.0
+        app.camera_yaw = 0.9
+        app.camera_elevation = math.radians(30)
+        app.pan_x = 120.0
+        app.pan_y = -45.0
+        app._draw_grid = Mock()
+        event = SimpleNamespace(delta=120, x=370, y=290)
+        center_x, center_y = app._canvas_center()
+        ground_x, ground_y = screen_to_ground_units(
+            event.x,
+            event.y,
+            center_x,
+            center_y,
+            app.spacing,
+            app.camera_yaw,
+            app.camera_elevation,
+        )
+
+        app._on_mouse_wheel(event)
+
+        new_center = app._canvas_center()
+        zoomed_position = project_3d(
+            ground_x * LIGHTYEARS_PER_GRID_STEP,
+            ground_y * LIGHTYEARS_PER_GRID_STEP,
+            0,
+            *new_center,
+            app.spacing,
+            app.camera_yaw,
+            app.camera_elevation,
+        )[:2]
+        self.assertAlmostEqual(zoomed_position[0], event.x)
+        self.assertAlmostEqual(zoomed_position[1], event.y)
 
 
 if __name__ == "__main__":

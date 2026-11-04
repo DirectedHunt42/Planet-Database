@@ -21,7 +21,7 @@ import darkdetect
 
 
 APP_NAME = "Planet Database"
-APP_VERSION = "0.9.7"
+APP_VERSION = "0.10.0"
 APP_ICON_PATH = Path(__file__).with_name("icons") / "planet-database.ico"
 DATABASE_FILENAME = "planet-systems.json"
 APP_SETTINGS_FILENAME = "app-settings.json"
@@ -30,6 +30,11 @@ LIGHTYEARS_PER_GRID_STEP = 1_000
 INITIAL_SPACING = 16.0
 MIN_SPACING = 8.0
 MAX_SPACING = 32768.0
+GRID_LINE_SPACING_FACTOR = 2
+DEFAULT_CAMERA_YAW = math.radians(-45.0)
+DEFAULT_CAMERA_ELEVATION = math.acos(math.sqrt(2.0 / 3.0))
+MIN_CAMERA_ELEVATION = math.radians(8.0)
+MAX_CAMERA_ELEVATION = math.radians(88.0)
 MAX_PROJECT_ARCHIVE_BYTES = 128 * 1024 * 1024
 NICE_GRID_INTERVALS_LIGHTYEARS = (
     1,
@@ -420,16 +425,57 @@ def project_isometric(
     )
 
 
+def project_3d(
+    x: float,
+    y: float,
+    z: float,
+    center_x: float,
+    center_y: float,
+    spacing: float,
+    yaw: float = DEFAULT_CAMERA_YAW,
+    elevation: float = DEFAULT_CAMERA_ELEVATION,
+) -> tuple[float, float, float]:
+    """Project a 3D light-year coordinate into camera space and return depth."""
+    x_units = x / LIGHTYEARS_PER_GRID_STEP
+    y_units = y / LIGHTYEARS_PER_GRID_STEP
+    z_units = z / LIGHTYEARS_PER_GRID_STEP
+    sin_yaw = math.sin(yaw)
+    cos_yaw = math.cos(yaw)
+    sin_elevation = math.sin(elevation)
+    cos_elevation = math.cos(elevation)
+    scale = spacing / math.cos(DEFAULT_CAMERA_ELEVATION)
+    screen_x = center_x + scale * (cos_yaw * x_units + sin_yaw * y_units)
+    screen_y = center_y - scale * (
+        sin_yaw * sin_elevation * x_units
+        - cos_yaw * sin_elevation * y_units
+        + cos_elevation * z_units
+    )
+    depth = (
+        -sin_yaw * cos_elevation * x_units
+        + cos_yaw * cos_elevation * y_units
+        + sin_elevation * z_units
+    )
+    return screen_x, screen_y, depth
+
+
 def screen_to_ground_units(
     screen_x: float,
     screen_y: float,
     center_x: float,
     center_y: float,
     spacing: float,
+    yaw: float = DEFAULT_CAMERA_YAW,
+    elevation: float = DEFAULT_CAMERA_ELEVATION,
 ) -> tuple[float, float]:
-    delta_x = (screen_x - center_x) / (math.sqrt(3.0) * spacing / 2.0)
-    delta_y = (screen_y - center_y) / (spacing / 2.0)
-    return (delta_x + delta_y) / 2.0, (delta_y - delta_x) / 2.0
+    scale = spacing / math.cos(DEFAULT_CAMERA_ELEVATION)
+    projected_x = (screen_x - center_x) / scale
+    projected_y = -(screen_y - center_y) / (scale * math.sin(elevation))
+    sin_yaw = math.sin(yaw)
+    cos_yaw = math.cos(yaw)
+    return (
+        cos_yaw * projected_x + sin_yaw * projected_y,
+        sin_yaw * projected_x - cos_yaw * projected_y,
+    )
 
 
 def snap_to_grid(
@@ -438,12 +484,14 @@ def snap_to_grid(
     center_x: float,
     center_y: float,
     spacing: float,
+    yaw: float = DEFAULT_CAMERA_YAW,
+    elevation: float = DEFAULT_CAMERA_ELEVATION,
 ) -> tuple[int, int] | None:
     """Snap to the nearest visible, unbounded ground-plane grid intersection."""
     subdivision_factor = grid_subdivision_factor(spacing)
     grid_step = LIGHTYEARS_PER_GRID_STEP / subdivision_factor
     unit_x, unit_y = screen_to_ground_units(
-        screen_x, screen_y, center_x, center_y, spacing
+        screen_x, screen_y, center_x, center_y, spacing, yaw, elevation
     )
     base_x = round(unit_x * subdivision_factor)
     base_y = round(unit_y * subdivision_factor)
@@ -451,19 +499,29 @@ def snap_to_grid(
     nearest: tuple[int, int, float] | None = None
     for x in range(base_x - 2, base_x + 3):
         for y in range(base_y - 2, base_y + 3):
-            point_x, point_y = project_isometric(
+            point_x, point_y, _depth = project_3d(
                 x * grid_step,
                 y * grid_step,
                 0,
                 center_x,
                 center_y,
                 spacing,
+                yaw,
+                elevation,
             )
             distance = math.hypot(point_x - screen_x, point_y - screen_y)
             if nearest is None or distance < nearest[2]:
                 nearest = (x, y, distance)
 
-    if nearest is None or nearest[2] > spacing / subdivision_factor * 0.6:
+    grid_x, grid_y, _depth = project_3d(
+        grid_step, 0, 0, 0, 0, spacing, yaw, elevation
+    )
+    x_spacing = math.hypot(grid_x, grid_y)
+    grid_x, grid_y, _depth = project_3d(
+        0, grid_step, 0, 0, 0, spacing, yaw, elevation
+    )
+    y_spacing = math.hypot(grid_x, grid_y)
+    if nearest is None or nearest[2] > min(x_spacing, y_spacing) * 0.6:
         return None
     return round(nearest[0] * grid_step), round(nearest[1] * grid_step)
 
@@ -475,9 +533,11 @@ def viewport_ground_bounds(
     center_y: float,
     spacing: float,
     subdivisions: int = 1,
+    yaw: float = DEFAULT_CAMERA_YAW,
+    elevation: float = DEFAULT_CAMERA_ELEVATION,
 ) -> tuple[int, int, int, int]:
     corners = [
-        screen_to_ground_units(x, y, center_x, center_y, spacing)
+        screen_to_ground_units(x, y, center_x, center_y, spacing, yaw, elevation)
         for x, y in ((0, 0), (width, 0), (0, height), (width, height))
     ]
     xs = [point[0] * subdivisions for point in corners]
@@ -497,19 +557,32 @@ def fit_view_to_systems(
     min_spacing: float = MIN_SPACING,
     max_spacing: float = MAX_SPACING,
     padding: float = 112.0,
+    yaw: float = DEFAULT_CAMERA_YAW,
+    elevation: float = DEFAULT_CAMERA_ELEVATION,
 ) -> tuple[tuple[float, float, float], float]:
     """Find a view centered on saved systems and scaled to fit their projected bounds."""
     if not systems:
         return (0.0, 0.0, 0.0), max_spacing
 
     coordinates = [
-        (system["x"] / LIGHTYEARS_PER_GRID_STEP,
-         system["y"] / LIGHTYEARS_PER_GRID_STEP,
-         system["z"] / LIGHTYEARS_PER_GRID_STEP)
+        (
+            system["x"] / LIGHTYEARS_PER_GRID_STEP,
+            system["y"] / LIGHTYEARS_PER_GRID_STEP,
+            system["z"] / LIGHTYEARS_PER_GRID_STEP,
+        )
         for system in systems
     ]
     projected = [
-        ((x - y) * math.sqrt(3.0) / 2.0, (x + y) / 2.0 - z)
+        project_3d(
+            x * LIGHTYEARS_PER_GRID_STEP,
+            y * LIGHTYEARS_PER_GRID_STEP,
+            z * LIGHTYEARS_PER_GRID_STEP,
+            0.0,
+            0.0,
+            1.0,
+            yaw,
+            elevation,
+        )[:2]
         for x, y, z in coordinates
     ]
     span_x = max(point[0] for point in projected) - min(
@@ -535,8 +608,17 @@ def fit_view_to_systems(
     return (center[0], center[1], center[2]), spacing
 
 
-def pan_to_center_coordinates(x: float, y: float, z: float, spacing: float) -> tuple[float, float]:
-    projected_x, projected_y = project_isometric(x, y, z, 0.0, 0.0, spacing)
+def pan_to_center_coordinates(
+    x: float,
+    y: float,
+    z: float,
+    spacing: float,
+    yaw: float = DEFAULT_CAMERA_YAW,
+    elevation: float = DEFAULT_CAMERA_ELEVATION,
+) -> tuple[float, float]:
+    projected_x, projected_y, _depth = project_3d(
+        x, y, z, 0.0, 0.0, spacing, yaw, elevation
+    )
     return -projected_x, -projected_y
 
 
@@ -561,6 +643,11 @@ def grid_interval_lightyears(spacing: float) -> int:
         NICE_GRID_INTERVALS_LIGHTYEARS,
         key=lambda interval: abs(math.log(interval / target_interval)),
     )
+
+
+def grid_display_interval_lightyears(spacing: float) -> int:
+    """Return the visible grid-line spacing without changing placement precision."""
+    return grid_interval_lightyears(spacing) * GRID_LINE_SPACING_FACTOR
 
 
 def grid_dash_pattern(spacing: float) -> tuple[int, int]:
@@ -634,7 +721,12 @@ class PlanetDatabaseApp:
         self.spacing = INITIAL_SPACING
         self.pan_x = 0.0
         self.pan_y = 0.0
+        self.camera_yaw = DEFAULT_CAMERA_YAW
+        self.camera_elevation = DEFAULT_CAMERA_ELEVATION
         self._drag_origin: tuple[int, int, float, float] | None = None
+        self._rotation_origin: tuple[
+            int, int, float, float, float, float, float, float
+        ] | None = None
         self._theme = "Dark" if _system_is_dark() else "Light"
         self.canvas_background = _theme_color(CANVAS_BACKGROUND, self._theme == "Dark")
         self._undo_history: list[dict[str, Any]] = []
@@ -865,9 +957,9 @@ class PlanetDatabaseApp:
         self.canvas.bind("<ButtonPress-1>", self._start_pan)
         self.canvas.bind("<B1-Motion>", self._move_pan)
         self.canvas.bind("<ButtonRelease-1>", self._end_pan)
-        self.canvas.bind("<ButtonPress-2>", self._start_pan)
-        self.canvas.bind("<B2-Motion>", self._move_pan)
-        self.canvas.bind("<ButtonRelease-2>", self._end_pan)
+        self.canvas.bind("<ButtonPress-2>", self._start_rotate)
+        self.canvas.bind("<B2-Motion>", self._move_rotate)
+        self.canvas.bind("<ButtonRelease-2>", self._end_rotate)
         self.canvas.bind("<Motion>", self._on_canvas_motion)
         self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
         body.add(
@@ -1414,7 +1506,13 @@ class PlanetDatabaseApp:
 
         vertical_coordinate = self.z_var.get() if self._is_adding_system else "0"
         location = snap_to_grid(
-            event.x, event.y, center_x, center_y, self.spacing
+            event.x,
+            event.y,
+            center_x,
+            center_y,
+            self.spacing,
+            getattr(self, "camera_yaw", DEFAULT_CAMERA_YAW),
+            getattr(self, "camera_elevation", DEFAULT_CAMERA_ELEVATION),
         )
         if location is None:
             self.status_var.set(
@@ -1443,18 +1541,25 @@ class PlanetDatabaseApp:
         self._draw_grid()
 
     def _nearest_system(
-        self, screen_x: float, screen_y: float, center_x: float, center_y: float
+        self,
+        screen_x: float,
+        screen_y: float,
+        center_x: float,
+        center_y: float,
+        max_distance: float = 15.0,
     ) -> dict[str, Any] | None:
         nearest: dict[str, Any] | None = None
-        nearest_distance = 15.0
+        nearest_distance = max_distance
         for system in self.project_data["systems"]:
-            x, y = project_isometric(
+            x, y, _depth = project_3d(
                 system["x"],
                 system["y"],
                 system["z"],
                 center_x,
                 center_y,
                 self.spacing,
+                getattr(self, "camera_yaw", DEFAULT_CAMERA_YAW),
+                getattr(self, "camera_elevation", DEFAULT_CAMERA_ELEVATION),
             )
             distance = math.hypot(x - screen_x, y - screen_y)
             if distance < nearest_distance:
@@ -1753,7 +1858,12 @@ class PlanetDatabaseApp:
         if spacing is not None:
             self.spacing = min(MAX_SPACING, max(MIN_SPACING, spacing))
         self.pan_x, self.pan_y = pan_to_center_coordinates(
-            x, y, z, self.spacing
+            x,
+            y,
+            z,
+            self.spacing,
+            self.camera_yaw,
+            self.camera_elevation,
         )
 
     def _fit_database_view(self) -> None:
@@ -1764,6 +1874,8 @@ class PlanetDatabaseApp:
             systems,
             max(self.canvas.winfo_width(), 2),
             max(self.canvas.winfo_height(), 2),
+            yaw=self.camera_yaw,
+            elevation=self.camera_elevation,
         )
         self._focus_coordinates(*center, spacing)
         self._draw_grid()
@@ -1855,6 +1967,25 @@ class PlanetDatabaseApp:
             max(self.canvas.winfo_height(), 2) / 2 + self.pan_y,
         )
 
+    def _project(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        center_x: float,
+        center_y: float,
+    ) -> tuple[float, float, float]:
+        return project_3d(
+            x,
+            y,
+            z,
+            center_x,
+            center_y,
+            self.spacing,
+            getattr(self, "camera_yaw", DEFAULT_CAMERA_YAW),
+            getattr(self, "camera_elevation", DEFAULT_CAMERA_ELEVATION),
+        )
+
     def _draw_grid(self) -> None:
         if not hasattr(self, "canvas"):
             return
@@ -1865,7 +1996,14 @@ class PlanetDatabaseApp:
         center_x, center_y = self._canvas_center()
         subdivision_factor = grid_subdivision_factor(self.spacing)
         minimum_x, maximum_x, minimum_y, maximum_y = viewport_ground_bounds(
-            width, height, center_x, center_y, self.spacing, subdivision_factor
+            width,
+            height,
+            center_x,
+            center_y,
+            self.spacing,
+            subdivision_factor,
+            getattr(self, "camera_yaw", DEFAULT_CAMERA_YAW),
+            getattr(self, "camera_elevation", DEFAULT_CAMERA_ELEVATION),
         )
         grid_step = LIGHTYEARS_PER_GRID_STEP / subdivision_factor
         maximum_lines = 3000
@@ -1875,24 +2013,26 @@ class PlanetDatabaseApp:
             return
 
         for fixed_x in x_coordinates:
-            start = project_isometric(
+            if fixed_x % GRID_LINE_SPACING_FACTOR and fixed_x != 0:
+                continue
+            start = self._project(
                 fixed_x * grid_step,
                 minimum_y * grid_step,
                 0,
                 center_x,
                 center_y,
-                self.spacing,
-            )
-            end = project_isometric(
+            )[:2]
+            end = self._project(
                 fixed_x * grid_step,
                 maximum_y * grid_step,
                 0,
                 center_x,
                 center_y,
-                self.spacing,
-            )
+            )[:2]
             is_y_axis = fixed_x == 0
-            is_major_line = fixed_x % subdivision_factor == 0
+            is_major_line = fixed_x % (
+                subdivision_factor * GRID_LINE_SPACING_FACTOR
+            ) == 0
             self.canvas.create_line(
                 *start,
                 *end,
@@ -1903,24 +2043,26 @@ class PlanetDatabaseApp:
             )
 
         for fixed_y in y_coordinates:
-            start = project_isometric(
+            if fixed_y % GRID_LINE_SPACING_FACTOR and fixed_y != 0:
+                continue
+            start = self._project(
                 minimum_x * grid_step,
                 fixed_y * grid_step,
                 0,
                 center_x,
                 center_y,
-                self.spacing,
-            )
-            end = project_isometric(
+            )[:2]
+            end = self._project(
                 maximum_x * grid_step,
                 fixed_y * grid_step,
                 0,
                 center_x,
                 center_y,
-                self.spacing,
-            )
+            )[:2]
             is_x_axis = fixed_y == 0
-            is_major_line = fixed_y % subdivision_factor == 0
+            is_major_line = fixed_y % (
+                subdivision_factor * GRID_LINE_SPACING_FACTOR
+            ) == 0
             self.canvas.create_line(
                 *start,
                 *end,
@@ -1930,9 +2072,7 @@ class PlanetDatabaseApp:
                 width=2.5 if is_x_axis else 1,
             )
 
-        origin_x, origin_y = project_isometric(
-            0, 0, 0, center_x, center_y, self.spacing
-        )
+        origin_x, origin_y, _depth = self._project(0, 0, 0, center_x, center_y)
         if -40 <= origin_x <= width + 40:
             self._draw_axis_z(origin_x, origin_y, height, subdivision_factor)
         self._draw_axis_labels(
@@ -1955,7 +2095,11 @@ class PlanetDatabaseApp:
         subdivision_factor: int,
     ) -> None:
         grid_step = LIGHTYEARS_PER_GRID_STEP / subdivision_factor
-        subdivision_spacing = self.spacing / subdivision_factor
+        vertical_scale = self.spacing * (
+            math.cos(getattr(self, "camera_elevation", DEFAULT_CAMERA_ELEVATION))
+            / math.cos(DEFAULT_CAMERA_ELEVATION)
+        )
+        subdivision_spacing = vertical_scale / subdivision_factor
         lowest_z = math.floor((origin_y - height) / subdivision_spacing)
         highest_z = math.ceil(origin_y / subdivision_spacing)
         self.canvas.create_line(
@@ -2007,23 +2151,29 @@ class PlanetDatabaseApp:
         subdivision_factor: int,
     ) -> None:
         grid_step = LIGHTYEARS_PER_GRID_STEP / subdivision_factor
-        stride = max(
-            1,
-            math.ceil(
-                135.0
-                / (math.sqrt(3.0) * self.spacing / subdivision_factor / 2.0)
-            ),
+        x_axis_point = self._project(
+            LIGHTYEARS_PER_GRID_STEP, 0, 0, origin_x, origin_y
         )
+        y_axis_point = self._project(
+            0, LIGHTYEARS_PER_GRID_STEP, 0, origin_x, origin_y
+        )
+        x_spacing = math.hypot(
+            x_axis_point[0] - origin_x, x_axis_point[1] - origin_y
+        ) / subdivision_factor
+        y_spacing = math.hypot(
+            y_axis_point[0] - origin_x, y_axis_point[1] - origin_y
+        ) / subdivision_factor
+        x_stride = max(1, math.ceil(135.0 / x_spacing))
+        y_stride = max(1, math.ceil(135.0 / y_spacing))
         for value in range(minimum_x, maximum_x + 1):
-            if value == 0 or value % stride:
+            if value == 0 or value % x_stride:
                 continue
-            screen_x, screen_y = project_isometric(
+            screen_x, screen_y, _depth = self._project(
                 value * grid_step,
                 0,
                 0,
                 origin_x,
                 origin_y,
-                self.spacing,
             )
             if -20 <= screen_x <= self.canvas.winfo_width() + 20:
                 self.canvas.create_text(
@@ -2036,14 +2186,14 @@ class PlanetDatabaseApp:
                 )
 
         for value in range(minimum_y, maximum_y + 1):
-            if value == 0 or value % stride:
+            if value == 0 or value % y_stride:
                 continue
-            screen_x, screen_y = project_isometric(
-                0, value * grid_step,
+            screen_x, screen_y, _depth = self._project(
+                0,
+                value * grid_step,
                 0,
                 origin_x,
                 origin_y,
-                self.spacing,
             )
             if -20 <= screen_x <= self.canvas.winfo_width() + 20:
                 self.canvas.create_text(
@@ -2055,26 +2205,42 @@ class PlanetDatabaseApp:
                     font=("Segoe UI", 8),
                 )
 
+        x_axis_x, x_axis_y, _depth = self._project(
+            LIGHTYEARS_PER_GRID_STEP, 0, 0, origin_x, origin_y
+        )
+        y_axis_x, y_axis_y, _depth = self._project(
+            0, LIGHTYEARS_PER_GRID_STEP, 0, origin_x, origin_y
+        )
         self.canvas.create_text(
-            origin_x + self.spacing * 1.2,
-            origin_y + self.spacing * 0.7,
+            x_axis_x,
+            x_axis_y,
             text="X+",
             fill=self._palette(ACCENT),
-            anchor="w",
+            anchor="center",
             font=("Segoe UI", 9, "bold"),
         )
         self.canvas.create_text(
-            origin_x - self.spacing * 1.2,
-            origin_y + self.spacing * 0.7,
+            y_axis_x,
+            y_axis_y,
             text="Y+",
             fill=self._palette(ACCENT),
-            anchor="e",
+            anchor="center",
             font=("Segoe UI", 9, "bold"),
         )
 
     def _draw_systems(self, center_x: float, center_y: float) -> None:
         hovered_system: dict[str, Any] | None = None
-        for system in self.project_data["systems"]:
+        projected_systems = sorted(
+            self.project_data["systems"],
+            key=lambda system: self._project(
+                system["x"],
+                system["y"],
+                system["z"],
+                center_x,
+                center_y,
+            )[2],
+        )
+        for system in projected_systems:
             self._draw_vertical_guide(
                 system["x"],
                 system["y"],
@@ -2082,13 +2248,12 @@ class PlanetDatabaseApp:
                 center_x,
                 center_y,
             )
-            screen_x, screen_y = project_isometric(
+            screen_x, screen_y, _depth = self._project(
                 system["x"],
                 system["y"],
                 system["z"],
                 center_x,
                 center_y,
-                self.spacing,
             )
             selected = system["id"] == self.selected_system_id
             star_type = system.get("starType", DEFAULT_STAR_TYPE)
@@ -2102,13 +2267,12 @@ class PlanetDatabaseApp:
                 hovered_system = system
 
         if hovered_system is not None:
-            hovered_x, hovered_y = project_isometric(
+            hovered_x, hovered_y, _depth = self._project(
                 hovered_system["x"],
                 hovered_system["y"],
                 hovered_system["z"],
                 center_x,
                 center_y,
-                self.spacing,
             )
             self._draw_system_name(
                 hovered_system["name"],
@@ -2134,8 +2298,8 @@ class PlanetDatabaseApp:
                 center_x,
                 center_y,
             )
-            screen_x, screen_y = project_isometric(
-                *coordinates, center_x, center_y, self.spacing
+            screen_x, screen_y, _depth = self._project(
+                *coordinates, center_x, center_y
             )
             self.canvas.create_oval(
                 screen_x - 7,
@@ -2375,12 +2539,8 @@ class PlanetDatabaseApp:
     ) -> None:
         if z == 0:
             return
-        ground_x, ground_y = project_isometric(
-            x, y, 0, center_x, center_y, self.spacing
-        )
-        system_x, system_y = project_isometric(
-            x, y, z, center_x, center_y, self.spacing
-        )
+        ground_x, ground_y, _depth = self._project(x, y, 0, center_x, center_y)
+        system_x, system_y, _depth = self._project(x, y, z, center_x, center_y)
         self.canvas.create_line(
             ground_x,
             ground_y,
@@ -2388,7 +2548,19 @@ class PlanetDatabaseApp:
             system_y,
             fill=self._palette(MUTED),
             width=1,
-            dash=grid_dash_pattern(self.spacing),
+            dash=grid_dash_pattern(
+                self.spacing
+                * (
+                    math.cos(
+                        getattr(
+                            self,
+                            "camera_elevation",
+                            DEFAULT_CAMERA_ELEVATION,
+                        )
+                    )
+                    / math.cos(DEFAULT_CAMERA_ELEVATION)
+                )
+            ),
         )
         self.canvas.create_oval(
             ground_x - 2,
@@ -2405,7 +2577,7 @@ class PlanetDatabaseApp:
             14,
             text=(
                 f"INFINITE GRID  ·  DIVISION = "
-                f"{LIGHTYEARS_PER_GRID_STEP / grid_subdivision_factor(self.spacing):,} LY"
+                f"{grid_display_interval_lightyears(self.spacing):,} LY"
             ),
             fill=self._palette(MUTED),
             anchor="nw",
@@ -2415,8 +2587,8 @@ class PlanetDatabaseApp:
             width - 14,
             height - 12,
             text=(
-                "CLICK STAR TO EDIT  ·  CLICK EMPTY MAP TO CLOSE  ·  "
-                "RIGHT-CLICK TO ADD  ·  DRAG TO PAN  ·  SCROLL TO ZOOM"
+                "CLICK STAR TO EDIT  ·  RIGHT-CLICK TO ADD  ·  "
+                "LEFT-DRAG TO PAN  ·  MIDDLE-DRAG TO ROTATE  ·  SCROLL TO ZOOM"
             ),
             fill=self._palette(MUTED),
             anchor="se",
@@ -2444,6 +2616,85 @@ class PlanetDatabaseApp:
         self._drag_origin = None
         self._drag_moved = False
 
+    def _start_rotate(self, event: tk.Event[tk.Canvas]) -> None:
+        width = max(self.canvas.winfo_width(), 2)
+        height = max(self.canvas.winfo_height(), 2)
+        center_x, center_y = self._canvas_center()
+        anchor_x = width / 2
+        anchor_y = height / 2
+        marker = self._nearest_system(
+            anchor_x,
+            anchor_y,
+            center_x,
+            center_y,
+            max_distance=math.inf,
+        )
+        if marker is not None:
+            pivot_x = marker["x"]
+            pivot_y = marker["y"]
+        else:
+            ground_x, ground_y = screen_to_ground_units(
+                anchor_x,
+                anchor_y,
+                center_x,
+                center_y,
+                self.spacing,
+                self.camera_yaw,
+                self.camera_elevation,
+            )
+            pivot_x = ground_x * LIGHTYEARS_PER_GRID_STEP
+            pivot_y = ground_y * LIGHTYEARS_PER_GRID_STEP
+        pivot_screen_x, pivot_screen_y, _depth = self._project(
+            pivot_x, pivot_y, 0, center_x, center_y
+        )
+        self._rotation_origin = (
+            event.x,
+            event.y,
+            self.camera_yaw,
+            self.camera_elevation,
+            pivot_x,
+            pivot_y,
+            pivot_screen_x,
+            pivot_screen_y,
+        )
+
+    def _move_rotate(self, event: tk.Event[tk.Canvas]) -> None:
+        if self._rotation_origin is None:
+            return
+        (
+            start_x,
+            start_y,
+            initial_yaw,
+            initial_elevation,
+            pivot_x,
+            pivot_y,
+            anchor_x,
+            anchor_y,
+        ) = self._rotation_origin
+        delta_x = event.x - start_x
+        delta_y = event.y - start_y
+        if math.hypot(delta_x, delta_y) < 3:
+            return
+        self.camera_yaw = (initial_yaw + delta_x * 0.008) % math.tau
+        self.camera_elevation = min(
+            MAX_CAMERA_ELEVATION,
+            max(
+                MIN_CAMERA_ELEVATION,
+                initial_elevation + delta_y * 0.008,
+            ),
+        )
+        width = max(self.canvas.winfo_width(), 2)
+        height = max(self.canvas.winfo_height(), 2)
+        projected_x, projected_y, _depth = self._project(
+            pivot_x, pivot_y, 0, 0.0, 0.0
+        )
+        self.pan_x = anchor_x - width / 2 - projected_x
+        self.pan_y = anchor_y - height / 2 - projected_y
+        self._draw_grid()
+
+    def _end_rotate(self, _event: tk.Event[tk.Canvas]) -> None:
+        self._rotation_origin = None
+
     def _on_mouse_wheel(self, event: tk.Event[tk.Canvas]) -> str:
         old_spacing = self.spacing
         zoom_factor = 1.1 if event.delta > 0 else 1 / 1.1
@@ -2453,14 +2704,20 @@ class PlanetDatabaseApp:
 
         center_x, center_y = self._canvas_center()
         ground_x, ground_y = screen_to_ground_units(
-            event.x, event.y, center_x, center_y, old_spacing
+            event.x,
+            event.y,
+            center_x,
+            center_y,
+            old_spacing,
+            self.camera_yaw,
+            self.camera_elevation,
         )
         world_x = ground_x * LIGHTYEARS_PER_GRID_STEP
         world_y = ground_y * LIGHTYEARS_PER_GRID_STEP
         base_x = max(self.canvas.winfo_width(), 2) / 2
         base_y = max(self.canvas.winfo_height(), 2) / 2
-        projected_x, projected_y = project_isometric(
-            world_x, world_y, 0, base_x, base_y, self.spacing
+        projected_x, projected_y, _depth = self._project(
+            world_x, world_y, 0, base_x, base_y
         )
         self.pan_x = event.x - projected_x
         self.pan_y = event.y - projected_y
