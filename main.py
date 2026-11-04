@@ -11,6 +11,7 @@ import tkinter as tk
 import uuid
 import zipfile
 import zlib
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Any
@@ -20,7 +21,7 @@ import darkdetect
 
 
 APP_NAME = "Planet Database"
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.9.7"
 APP_ICON_PATH = Path(__file__).with_name("icons") / "planet-database.ico"
 DATABASE_FILENAME = "planet-systems.json"
 APP_SETTINGS_FILENAME = "app-settings.json"
@@ -28,7 +29,7 @@ LEGACY_SETTINGS_FILENAME = "settings.json"
 LIGHTYEARS_PER_GRID_STEP = 1_000
 INITIAL_SPACING = 16.0
 MIN_SPACING = 8.0
-MAX_SPACING = 512.0
+MAX_SPACING = 32768.0
 MAX_PROJECT_ARCHIVE_BYTES = 128 * 1024 * 1024
 NICE_GRID_INTERVALS_LIGHTYEARS = (
     1,
@@ -83,7 +84,7 @@ def _theme_color(color: str | tuple[str, str], is_dark: bool) -> str:
 
 def nearest_systems(
     systems: list[dict[str, Any]],
-    coordinates: tuple[int, int, int],
+    coordinates: tuple[int | float, int | float, int | float],
     *,
     exclude_id: str | None = None,
     limit: int = 4,
@@ -171,9 +172,18 @@ def find_system_by_id(
 
 
 def is_coordinate(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        return False
+    try:
+        decimal_value = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return False
     return (
-        type(value) is int
-        and -MAX_COORDINATE_LIGHTYEARS <= value <= MAX_COORDINATE_LIGHTYEARS
+        decimal_value.is_finite()
+        and -MAX_COORDINATE_LIGHTYEARS
+        <= decimal_value
+        <= MAX_COORDINATE_LIGHTYEARS
+        and decimal_value.normalize().as_tuple().exponent >= -5
     )
 
 
@@ -319,12 +329,13 @@ def _validate_systems(data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("The database's systems list is invalid.")
 
     seen_ids: set[str] = set()
-    seen_locations: set[tuple[int, int, int]] = set()
+    seen_locations: set[tuple[int | float, int | float, int | float]] = set()
     for system in systems:
         if not isinstance(system, dict):
             raise ValueError("The database contains an invalid system record.")
         system_id = system.get("id")
         name = system.get("name")
+        notes = system.get("notes", "")
         x, y, z = (system.get(axis) for axis in ("x", "y", "z"))
         if (
             not isinstance(system_id, str)
@@ -333,6 +344,7 @@ def _validate_systems(data: dict[str, Any]) -> dict[str, Any]:
             or not isinstance(name, str)
             or not name.strip()
             or len(name) > 80
+            or not isinstance(notes, str)
             or not all(is_coordinate(value) for value in (x, y, z))
             or (x, y, z) in seen_locations
             or (
@@ -462,13 +474,14 @@ def viewport_ground_bounds(
     center_x: float,
     center_y: float,
     spacing: float,
+    subdivisions: int = 1,
 ) -> tuple[int, int, int, int]:
     corners = [
         screen_to_ground_units(x, y, center_x, center_y, spacing)
         for x, y in ((0, 0), (width, 0), (0, height), (width, height))
     ]
-    xs = [point[0] for point in corners]
-    ys = [point[1] for point in corners]
+    xs = [point[0] * subdivisions for point in corners]
+    ys = [point[1] * subdivisions for point in corners]
     return (
         math.floor(min(xs)) - 2,
         math.ceil(max(xs)) + 2,
@@ -614,6 +627,7 @@ class PlanetDatabaseApp:
             self.app_settings_error = str(exc)
         self.project_data = empty_project()
         self.selected_system_id: str | None = None
+        self._is_adding_system = False
         self._hovered_system_id: str | None = None
         self._hover_label_bounds: tuple[int, int, int, int] | None = None
         self._drag_moved = False
@@ -627,6 +641,12 @@ class PlanetDatabaseApp:
         self._redo_history: list[dict[str, Any]] = []
         self._history_limit = 100
         self.editor_panel: ctk.CTkFrame | None = None
+        self.editor_content: ctk.CTkScrollableFrame | None = None
+        self.editor_header: ctk.CTkFrame | None = None
+        self.notes_panel: ctk.CTkFrame | None = None
+        self._editor_pack_info: dict[tk.Widget, dict[str, Any]] = {}
+        self._scrollable_frames: list[ctk.CTkScrollableFrame] = []
+        self._notes_view = False
         self.nearest_system_labels: list[ctk.CTkLabel] = []
         self._nearest_refresh_after: str | None = None
         self._settings_save_after: str | None = None
@@ -803,27 +823,31 @@ class PlanetDatabaseApp:
             text="SYSTEM CATALOG",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=TEXT,
-        ).pack(anchor="w", padx=16, pady=(16, 4))
+            justify="center",
+        ).pack(fill="x", padx=16, pady=(16, 4))
         ctk.CTkLabel(
             sidebar,
             text="Select a system to focus it and open its editor.",
             text_color=MUTED,
             font=ctk.CTkFont(size=10),
             wraplength=270,
-            justify="left",
-        ).pack(anchor="w", padx=16, pady=(0, 12))
+            justify="center",
+        ).pack(fill="x", padx=16, pady=(0, 12))
         ctk.CTkLabel(
             sidebar,
             text="SAVED SYSTEMS",
             text_color=MUTED,
             font=ctk.CTkFont(size=9, weight="bold"),
-        ).pack(anchor="w", padx=16, pady=(0, 7))
+            justify="center",
+        ).pack(fill="x", padx=16, pady=(0, 7))
         self.system_list = ctk.CTkScrollableFrame(
             sidebar,
             fg_color="transparent",
             scrollbar_button_color=GRID,
             scrollbar_button_hover_color=ACCENT,
         )
+        self._scrollable_frames.append(self.system_list)
+        self._bind_panel_mouse_wheel_tree(self.system_list)
         self.system_list.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.system_rows: dict[str, ctk.CTkButton] = {}
 
@@ -900,8 +924,11 @@ class PlanetDatabaseApp:
             scrollbar_button_color=GRID,
             scrollbar_button_hover_color=ACCENT,
         )
+        self.editor_content = content
+        self._scrollable_frames.append(content)
         content.pack(fill="both", expand=True, padx=12, pady=10)
         header = ctk.CTkFrame(content, fg_color="transparent")
+        self.editor_header = header
         header.pack(fill="x", pady=(0, 14))
         title = "Edit star system" if self.selected_system_id else "Add star system"
         self.editor_title = ctk.CTkLabel(
@@ -959,6 +986,7 @@ class PlanetDatabaseApp:
             scrollbar_button_color=GRID,
             scrollbar_button_hover_color=ACCENT,
         )
+        self._scrollable_frames.append(star_type_list)
         star_type_list.pack(fill="x")
         for star_type_label in STAR_TYPE_LABELS:
             ctk.CTkRadioButton(
@@ -1029,6 +1057,30 @@ class PlanetDatabaseApp:
             command=self._copy_system_id,
         ).pack(side="right")
 
+        notes_panel = ctk.CTkFrame(content, fg_color=("#eeeeee", "#101010"))
+        self.notes_panel = notes_panel
+        notes_panel.pack(fill="x", pady=(18, 12))
+        notes_header = ctk.CTkFrame(notes_panel, fg_color="transparent")
+        notes_header.pack(fill="x", padx=12, pady=(10, 5))
+        ctk.CTkLabel(
+            notes_header,
+            text="NOTES",
+            text_color=TEXT,
+            font=ctk.CTkFont(size=10, weight="bold"),
+        ).pack(side="left")
+        self.notes_text = ctk.CTkTextbox(
+            notes_panel,
+            height=120,
+            wrap="word",
+            fg_color=("#ffffff", "#080808"),
+            border_color=("#a0a0a0", "#444444"),
+            text_color=TEXT,
+        )
+        self.notes_text.pack(fill="x", padx=10, pady=(0, 10))
+        self.notes_text.bind("<Control-s>", self._on_shortcut_save)
+        self.notes_text.bind("<Control-z>", self._on_shortcut_undo)
+        self.notes_text.bind("<Control-y>", self._on_shortcut_redo)
+
         reference_panel = ctk.CTkFrame(content, fg_color=("#eeeeee", "#101010"))
         reference_panel.pack(fill="x", pady=(18, 12))
         ctk.CTkLabel(
@@ -1078,6 +1130,10 @@ class PlanetDatabaseApp:
         )
         self.delete_star_button.pack(side="right")
 
+        self._editor_pack_info = {
+            widget: widget.pack_info() for widget in content.winfo_children()
+        }
+        self._bind_panel_mouse_wheel_tree(content)
         for variable in (self.x_var, self.y_var, self.z_var):
             variable.trace_add("write", self._schedule_nearest_refresh)
         self.save_toolbar_button.configure(state="normal")
@@ -1091,9 +1147,44 @@ class PlanetDatabaseApp:
         if self.selected_system_id is None:
             self.editor_title.configure(text="Add star system")
             self.delete_star_button.configure(state="disabled")
+            self.notes_text.configure(state="normal")
         else:
-            self.editor_title.configure(text="Edit star system")
+            self.editor_title.configure(
+                text=self.name_var.get() if self._notes_view else "Edit star system"
+            )
             self.delete_star_button.configure(state="normal")
+            self.notes_text.configure(
+                state="disabled" if self._notes_view else "normal"
+            )
+
+    def _show_notes_view(self) -> None:
+        if self.editor_content is None or self.notes_panel is None:
+            return
+        self._notes_view = True
+        for widget in self.editor_content.winfo_children():
+            widget.pack_forget()
+        self.editor_header.pack(fill="x", pady=(0, 14))
+        self.notes_panel.pack(fill="both", expand=True, pady=(18, 12))
+        self.notes_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.notes_text.configure(state="disabled")
+        self._update_star_editor_mode()
+
+    def _show_system_editor(self) -> None:
+        if self.editor_content is None:
+            return
+        self._notes_view = False
+        for widget in self.editor_content.winfo_children():
+            widget.pack_forget()
+        for widget, options in self._editor_pack_info.items():
+            widget.pack(**options)
+        self._update_star_editor_mode()
+
+    def _set_notes_text(self, notes: str) -> None:
+        self.notes_text.configure(state="normal")
+        self.notes_text.delete("1.0", "end")
+        if notes:
+            self.notes_text.insert("1.0", notes)
+        self._update_star_editor_mode()
 
     def _schedule_nearest_refresh(self, *_args: str) -> None:
         if self._nearest_refresh_after is not None:
@@ -1145,6 +1236,8 @@ class PlanetDatabaseApp:
                         else "—"
                     )
                 )
+        if self._is_adding_system:
+            self._draw_grid()
 
     def _close_star_editor(self) -> None:
         if self._nearest_refresh_after is not None:
@@ -1157,6 +1250,7 @@ class PlanetDatabaseApp:
         if self.editor_panel is not None and self.editor_panel.winfo_exists():
             self.workspace_body.forget(self.editor_panel)
         self.selected_system_id = None
+        self._is_adding_system = False
         self.id_var.set("")
         self._refresh_systems()
         self._draw_grid()
@@ -1216,7 +1310,7 @@ class PlanetDatabaseApp:
             row = ctk.CTkButton(
                 self.system_list,
                 text=f"{system['name']}\n{coordinates}",
-                anchor="w",
+                anchor="center",
                 height=48,
                 fg_color=(
                     ("#e0e0e0", "#303030")
@@ -1226,19 +1320,40 @@ class PlanetDatabaseApp:
                 text_color=TEXT,
                 hover_color=("#dddddd", "#2b2b2b"),
                 command=lambda selected_id=system_id: self._select_system_by_id(
-                    selected_id
+                    selected_id, show_notes_only=True
                 ),
             )
             row.pack(fill="x", padx=3, pady=3)
+            row.bind(
+                "<Button-3>",
+                lambda event, selected_id=system_id: self._on_catalog_context_click(
+                    event, selected_id
+                ),
+            )
+            self._bind_panel_mouse_wheel_tree(row)
             self.system_rows[system_id] = row
 
-    def _select_system_by_id(self, system_id: str) -> None:
+    def _select_system_by_id(
+        self, system_id: str, *, show_notes_only: bool = False
+    ) -> None:
         system = find_system_by_id(self.project_data["systems"], system_id)
         if system is not None:
-            self._select_system(system)
+            self._select_system(system, show_notes_only=show_notes_only)
 
-    def _select_system(self, system: dict[str, Any]) -> None:
+    def _on_catalog_context_click(
+        self, _event: tk.Event[ctk.CTkButton], system_id: str
+    ) -> str:
+        system = find_system_by_id(self.project_data["systems"], system_id)
+        if system is not None:
+            self._select_system(system, show_notes_only=False)
+        return "break"
+
+    def _select_system(
+        self, system: dict[str, Any], *, show_notes_only: bool = False
+    ) -> None:
         self.selected_system_id = system["id"]
+        self._is_adding_system = False
+        self._notes_view = show_notes_only
         self._hovered_system_id = None
         self.id_var.set(system["id"])
         self.x_var.set(str(system["x"]))
@@ -1260,6 +1375,11 @@ class PlanetDatabaseApp:
         self._draw_grid()
         self._open_star_editor()
         self._update_star_editor_mode()
+        self._set_notes_text(system.get("notes", ""))
+        if show_notes_only:
+            self._show_notes_view()
+        else:
+            self._show_system_editor()
 
     def _on_canvas_select_click(self, event: tk.Event[tk.Canvas]) -> None:
         center_x, center_y = self._canvas_center()
@@ -1292,6 +1412,7 @@ class PlanetDatabaseApp:
             self._select_system(marker)
             return
 
+        vertical_coordinate = self.z_var.get() if self._is_adding_system else "0"
         location = snap_to_grid(
             event.x, event.y, center_x, center_y, self.spacing
         )
@@ -1302,16 +1423,21 @@ class PlanetDatabaseApp:
             return
 
         self.selected_system_id = None
+        self._is_adding_system = True
+        self._notes_view = False
         self.id_var.set("")
         self.x_var.set(str(location[0]))
         self.y_var.set(str(location[1]))
-        self.z_var.set("0")
+        self.z_var.set(vertical_coordinate)
         self.name_var.set("")
         self.star_type_var.set(STAR_TYPES[DEFAULT_STAR_TYPE][0])
         self._refresh_systems()
         self._open_star_editor()
+        self._show_system_editor()
+        self._set_notes_text("")
         self.status_var.set(
-            f"New star location: ({location[0]:,}, {location[1]:,}, 0) light-years."
+            f"New star location: "
+            f"({location[0]:,}, {location[1]:,}, {vertical_coordinate}) light-years."
         )
         self._update_nearest_references()
         self._draw_grid()
@@ -1336,17 +1462,25 @@ class PlanetDatabaseApp:
                 nearest_distance = distance
         return nearest
 
-    def _read_coordinate(self, variable: tk.StringVar, axis: str) -> int:
+    def _read_coordinate(
+        self, variable: tk.StringVar, axis: str
+    ) -> int | float:
         try:
-            value = int(variable.get().replace(",", "").strip())
-        except ValueError as exc:
-            raise ValueError(f"{axis} must be a whole number of light-years.") from exc
+            value = Decimal(variable.get().replace(",", "").strip())
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(
+                f"{axis} must be a number with up to 5 decimal places."
+            ) from exc
         if not is_coordinate(value):
             raise ValueError(
                 f"{axis} must be between "
-                f"{-MAX_COORDINATE_LIGHTYEARS:,} and {MAX_COORDINATE_LIGHTYEARS:,} light-years."
+                f"{-MAX_COORDINATE_LIGHTYEARS:,} and "
+                f"{MAX_COORDINATE_LIGHTYEARS:,} light-years, with no more "
+                "than 5 decimal places."
             )
-        return value
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
 
     def _save_system(self) -> None:
         if (
@@ -1417,6 +1551,7 @@ class PlanetDatabaseApp:
                 "y": y,
                 "z": z,
                 "starType": star_type,
+                "notes": self.notes_text.get("1.0", "end-1c"),
             }
         )
         updated_data = {
@@ -1438,6 +1573,7 @@ class PlanetDatabaseApp:
             self._redo_history.clear()
         self.project_data = updated_data
         self.selected_system_id = updated["id"]
+        self._is_adding_system = False
         self.id_var.set(updated["id"])
         self._focus_coordinates(x, y, z, MAX_SPACING)
         self._refresh_systems()
@@ -1485,6 +1621,7 @@ class PlanetDatabaseApp:
         self._redo_history.clear()
         self.project_data = updated_data
         self.selected_system_id = None
+        self._is_adding_system = False
         self._hovered_system_id = None
         self.id_var.set("")
         self.name_var.set("")
@@ -1499,6 +1636,8 @@ class PlanetDatabaseApp:
 
     def _new_location(self) -> None:
         self.selected_system_id = None
+        self._is_adding_system = True
+        self._notes_view = False
         self._hovered_system_id = None
         self.id_var.set("")
         self.name_var.set("")
@@ -1516,6 +1655,8 @@ class PlanetDatabaseApp:
         self.z_var.set("0")
         self._refresh_systems()
         self._open_star_editor()
+        self._show_system_editor()
+        self._set_notes_text("")
         self.status_var.set("New star at the map center. Set its details and save.")
         self._draw_grid()
 
@@ -1586,6 +1727,7 @@ class PlanetDatabaseApp:
             self._redo_history.clear()
         self.project_data = imported_data
         self.selected_system_id = None
+        self._is_adding_system = False
         self.id_var.set("")
         self.name_var.set("")
         self.star_type_var.set(STAR_TYPES[DEFAULT_STAR_TYPE][0])
@@ -1721,15 +1863,11 @@ class PlanetDatabaseApp:
         width = max(self.canvas.winfo_width(), 2)
         height = max(self.canvas.winfo_height(), 2)
         center_x, center_y = self._canvas_center()
-        minimum_x, maximum_x, minimum_y, maximum_y = viewport_ground_bounds(
-            width, height, center_x, center_y, self.spacing
-        )
         subdivision_factor = grid_subdivision_factor(self.spacing)
+        minimum_x, maximum_x, minimum_y, maximum_y = viewport_ground_bounds(
+            width, height, center_x, center_y, self.spacing, subdivision_factor
+        )
         grid_step = LIGHTYEARS_PER_GRID_STEP / subdivision_factor
-        minimum_x *= subdivision_factor
-        maximum_x *= subdivision_factor
-        minimum_y *= subdivision_factor
-        maximum_y *= subdivision_factor
         maximum_lines = 3000
         x_coordinates = range(minimum_x, maximum_x + 1)
         y_coordinates = range(minimum_y, maximum_y + 1)
@@ -1979,7 +2117,7 @@ class PlanetDatabaseApp:
                 hovered_system.get("starType", DEFAULT_STAR_TYPE),
             )
 
-        if self.selected_system_id is None:
+        if self._is_adding_system:
             try:
                 coordinates = tuple(
                     self._read_coordinate(variable, axis)
@@ -2229,9 +2367,9 @@ class PlanetDatabaseApp:
 
     def _draw_vertical_guide(
         self,
-        x: int,
-        y: int,
-        z: int,
+        x: float,
+        y: float,
+        z: float,
         center_x: float,
         center_y: float,
     ) -> None:
@@ -2328,6 +2466,68 @@ class PlanetDatabaseApp:
         self.pan_y = event.y - projected_y
         self._draw_grid()
         return "break"
+
+    def _bind_panel_mouse_wheel_tree(self, widget: tk.Misc) -> None:
+        tk.Misc.bind(widget, "<MouseWheel>", self._on_panel_mouse_wheel, add="+")
+        tk.Misc.bind(
+            widget,
+            "<Button-4>",
+            lambda event: self._on_panel_mouse_wheel(event, direction=-1),
+            add="+",
+        )
+        tk.Misc.bind(
+            widget,
+            "<Button-5>",
+            lambda event: self._on_panel_mouse_wheel(event, direction=1),
+            add="+",
+        )
+        for child in widget.winfo_children():
+            self._bind_panel_mouse_wheel_tree(child)
+
+    def _on_panel_mouse_wheel(
+        self, event: tk.Event[tk.Misc], *, direction: int | None = None
+    ) -> str | None:
+        notes_text = getattr(self, "notes_text", None)
+        if notes_text is not None and self._widget_is_within(event.widget, notes_text):
+            units = self._mouse_wheel_units(event, direction)
+            notes_text._textbox.yview_scroll(units, "units")
+            return "break"
+
+        candidates: list[tuple[int, ctk.CTkScrollableFrame]] = []
+        for frame in self._scrollable_frames:
+            if not frame.winfo_exists():
+                continue
+            distance = 0
+            widget: tk.Misc | None = event.widget
+            while widget is not None and widget != frame._parent_canvas:
+                widget = getattr(widget, "master", None)
+                distance += 1
+            if widget == frame._parent_canvas:
+                candidates.append((distance, frame))
+        if not candidates:
+            return None
+        _distance, scrollable = min(candidates, key=lambda candidate: candidate[0])
+
+        units = self._mouse_wheel_units(event, direction)
+        scrollable._parent_canvas.yview_scroll(units, "units")
+        return "break"
+
+    @staticmethod
+    def _mouse_wheel_units(
+        event: tk.Event[tk.Misc], direction: int | None
+    ) -> int:
+        if direction is not None:
+            return direction * 3
+        direction = -1 if event.delta > 0 else 1
+        return max(1, round(abs(event.delta) / 120 * 3)) * direction
+
+    @staticmethod
+    def _widget_is_within(widget: tk.Misc, ancestor: tk.Misc) -> bool:
+        while widget is not None:
+            if widget == ancestor:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
 
     def _palette(self, color: str | tuple[str, str]) -> str:
         return _theme_color(color, self._theme == "Dark")

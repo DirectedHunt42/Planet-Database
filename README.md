@@ -2,7 +2,7 @@
 
 A lightweight desktop app for mapping named star systems on an isometric grid. The display is 2D; each system retains independent **X, Y, and Z coordinates in light-years**, so the same data can be used in a future 3D view.
 
-**Current version: 0.9.0.** The app displays its version in the header. Versions follow Semantic Versioning: feature releases advance the minor number, and fixes advance the patch number. The version is maintained in `main.py` and updated as the app changes.
+**Current version: 0.9.7.** The app displays its version in the header. Versions follow Semantic Versioning: feature releases advance the minor number, and fixes advance the patch number. The version is maintained in `main.py` and updated as the app changes.
 
 ## Run
 
@@ -35,15 +35,17 @@ The standalone folder can be moved as a unit. The app’s database and settings 
 
 ## Map and systems
 
-- **The base grid interval is 1,000 light-years.** Zooming in uses round-number intervals down to 25 light-years at maximum zoom; placement snaps to the visible subdivisions. Vertical guide dash lengths track the active interval. The map is general-purpose and is not tied to any particular galaxy.
+- **The base grid interval is 1,000 light-years.** Zooming in uses round-number intervals down to 1 light-year at maximum zoom; placement snaps to the visible subdivisions. Vertical guide dash lengths track the active interval. Coordinates can be entered to five decimal places. The map is general-purpose and is not tied to any particular galaxy.
 - The isometric grid is drawn for the visible area and continues as you pan and zoom.
-- Right-click a grid intersection to choose X and Y; enter Z separately. Systems with nonzero Z show a vertical guide from their map position down to the ground plane.
+- Right-click a grid intersection to choose X and Y; enter Z separately. Right-clicking again while adding a system repositions it without changing Z. The placement preview appears only while adding a star system. For nonzero Z, its guide runs from the ground-grid location up to the star marker and updates as coordinates change.
 - Map labels stay hidden until you hover over a marker. Click a saved marker to show its editor panel beside the map; click an empty map area to close it. Right-click a grid intersection to add a star. The editor shows the four closest other systems by straight-line 3D distance, updating as its coordinates change.
 - Drag the vertical dividers between the system catalog, editor, and map to resize each panel horizontally.
 - Panel widths are saved after resizing and when the app closes in `%APPDATA%\Planet Database\app-settings.json`, then restored when the app starts.
 - Select a stellar class when creating or editing a system. The map uses small shape-and-color markers for yellow, orange, red, brown, and white dwarfs; red, orange, and blue giants; Wolf–Rayet stars; neutron stars; pulsars; black holes; and binary or trinary star systems. Older records without a star type display as yellow dwarfs; records using the retired “White star” type are now treated as white dwarfs.
 - Left-drag to pan the map; the middle mouse button can also pan. Scroll to zoom.
-- Zoom in up to 8 times farther than before; the grid continues subdividing to match.
+- The maximum zoom level has been increased another 8×, to 32768 spacing; the grid continues subdividing to match.
+- System catalog text is centered. Left-clicking a catalog entry opens a read-only panel showing only that system's notes. Right-clicking an entry opens the full system editor, including editable notes; use **Save system** to save changes.
+- Scrolling over a nested panel, such as the stellar-type list, scrolls that panel rather than also scrolling its containing editor.
 - On startup, the view automatically frames saved systems instead of assuming they are near the origin. Selecting or saving a system recenters and zooms in on it.
 - Each system gets a unique, persistent ID (shown in its editor with a copy button) that can be used to attach planet, moon, or other records later.
 - A grouped action bar keeps star actions, session history, and project import/export in separate, labeled groups. Use **Save system** or **Ctrl+S** to save. Star types are selected in the editor itself; there are no popout menus. The system-aware app theme uses neutral grays in both light and dark modes.

@@ -7,7 +7,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from main import (
     APP_SETTINGS_FILENAME,
@@ -15,6 +15,8 @@ from main import (
     LIGHTYEARS_PER_GRID_STEP,
     MAX_SPACING,
     MIN_SPACING,
+    MUTED,
+    PlanetDatabaseApp,
     STAR_TYPES,
     app_settings_path,
     create_unique_system_id,
@@ -27,6 +29,7 @@ from main import (
     grid_dash_pattern,
     grid_interval_lightyears,
     grid_subdivision_factor,
+    is_coordinate,
     load_app_settings,
     load_database,
     load_legacy_database,
@@ -225,6 +228,74 @@ class DatabaseTests(unittest.TestCase):
                 ):
                     load_database(path)
 
+    def test_system_notes_are_optional_text_and_reject_invalid_values(self) -> None:
+        contents = {
+            "formatVersion": 2,
+            "coordinateUnit": "light-years",
+            "systems": [
+                {
+                    "id": "star",
+                    "name": "Star",
+                    "x": 0,
+                    "y": 0,
+                    "z": 0,
+                    "notes": "A quiet system.",
+                }
+            ],
+        }
+        loaded = _parse_database_contents(json.dumps(contents))[0]
+        self.assertEqual(
+            loaded["systems"][0]["notes"],
+            "A quiet system.",
+        )
+        contents["systems"][0]["notes"] = ["not text"]
+        with self.assertRaisesRegex(ValueError, "invalid or duplicate system"):
+            _parse_database_contents(json.dumps(contents))
+
+    def test_coordinates_allow_up_to_five_decimal_places(self) -> None:
+        for value in (0, -12, 1.23456, -0.00001, 1.230000):
+            with self.subTest(value=value):
+                self.assertTrue(is_coordinate(value))
+        for value in (1.234567, float("inf"), float("nan"), True, "1.25"):
+            with self.subTest(value=value):
+                self.assertFalse(is_coordinate(value))
+
+    def test_coordinate_editor_parses_five_decimals_and_rejects_six(self) -> None:
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+
+        self.assertEqual(
+            app._read_coordinate(SimpleNamespace(get=lambda: "-1,234.12345"), "X"),
+            -1_234.12345,
+        )
+        with self.assertRaisesRegex(ValueError, "no more than 5 decimal places"):
+            app._read_coordinate(SimpleNamespace(get=lambda: "0.123456"), "X")
+
+    def test_database_round_trips_fractional_lightyear_coordinates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / DATABASE_FILENAME
+            data = {
+                "formatVersion": 2,
+                "coordinateUnit": "light-years",
+                "systems": [
+                    {
+                        "id": "fractional-star",
+                        "name": "Fractional Star",
+                        "x": 1.23456,
+                        "y": -0.00001,
+                        "z": 2,
+                    }
+                ],
+            }
+            path.write_text(json.dumps(data), encoding="utf-8")
+
+            loaded, _migrated = load_database(path)
+
+        self.assertEqual(
+            (loaded["systems"][0]["x"], loaded["systems"][0]["y"],
+             loaded["systems"][0]["z"]),
+            (1.23456, -0.00001, 2),
+        )
+
     def test_unknown_star_type_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / DATABASE_FILENAME
@@ -340,13 +411,93 @@ class InfiniteLightyearGridTests(unittest.TestCase):
         self.assertEqual(grid_subdivision_factor(63.9), 4)
         self.assertEqual(grid_subdivision_factor(64.0), 4)
         self.assertEqual(grid_subdivision_factor(512.0), 40)
+        self.assertEqual(MAX_SPACING, 32768.0)
+        self.assertEqual(grid_subdivision_factor(MAX_SPACING), 1000)
 
     def test_grid_intervals_are_round_whole_lightyear_values(self) -> None:
         self.assertEqual(
-            [grid_interval_lightyears(zoom) for zoom in (16, 32, 64, 128, 256, 512)],
-            [1_000, 500, 250, 100, 50, 25],
+            [
+                grid_interval_lightyears(zoom)
+                for zoom in (16, 32, 64, 128, 256, 512, 4096, MAX_SPACING)
+            ],
+            [1_000, 500, 250, 100, 50, 25, 5, 1],
         )
-        self.assertEqual(1_000 % grid_interval_lightyears(512), 0)
+        self.assertEqual(1_000 % grid_interval_lightyears(MAX_SPACING), 0)
+
+    def test_catalog_context_click_opens_the_full_system_editor(self) -> None:
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        system = {"id": "star", "name": "Star", "notes": "A quiet system."}
+        app.project_data = {"systems": [system]}
+        app._select_system = Mock()
+
+        result = app._on_catalog_context_click(None, "star")
+
+        app._select_system.assert_called_once_with(system, show_notes_only=False)
+        self.assertEqual(result, "break")
+
+    def test_panel_mouse_wheel_scrolls_only_the_nearest_nested_frame(self) -> None:
+        class FakeCanvas:
+            def __init__(self, master=None):
+                self.master = master
+                self.scroll_units = []
+
+            def yview_scroll(self, units, _mode):
+                self.scroll_units.append(units)
+
+        class FakeScrollable:
+            def __init__(self, canvas):
+                self._parent_canvas = canvas
+
+            @staticmethod
+            def winfo_exists():
+                return True
+
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        outer_canvas = FakeCanvas()
+        inner_canvas = FakeCanvas(master=outer_canvas)
+        app._scrollable_frames = [
+            FakeScrollable(outer_canvas),
+            FakeScrollable(inner_canvas),
+        ]
+
+        result = app._on_panel_mouse_wheel(
+            SimpleNamespace(widget=inner_canvas, delta=-120)
+        )
+
+        self.assertEqual(result, "break")
+        self.assertEqual(inner_canvas.scroll_units, [3])
+        self.assertEqual(outer_canvas.scroll_units, [])
+
+    def test_panel_mouse_wheel_over_notes_scrolls_the_notes_text(self) -> None:
+        class FakeText:
+            def __init__(self):
+                self.scroll_units = []
+
+            def yview_scroll(self, units, _mode):
+                self.scroll_units.append(units)
+
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        notes_panel = SimpleNamespace(master=None)
+        text_widget = SimpleNamespace(master=notes_panel)
+        notes_panel._textbox = FakeText()
+        app.notes_text = notes_panel
+        app._scrollable_frames = []
+
+        result = app._on_panel_mouse_wheel(
+            SimpleNamespace(widget=text_widget, delta=-120)
+        )
+
+        self.assertEqual(result, "break")
+        self.assertEqual(notes_panel._textbox.scroll_units, [3])
+
+    def test_subdivision_bounds_stay_viewport_sized_at_max_zoom(self) -> None:
+        bounds = viewport_ground_bounds(
+            1200, 800, 600, 400, MAX_SPACING, subdivisions=1000
+        )
+        x_lines = bounds[1] - bounds[0] + 1
+        y_lines = bounds[3] - bounds[2] + 1
+
+        self.assertLess(x_lines + y_lines, 200)
 
     def test_snapping_uses_zoomed_subdivisions(self) -> None:
         center = (580.0, 380.0)
@@ -366,6 +517,100 @@ class InfiniteLightyearGridTests(unittest.TestCase):
         self.assertEqual(grid_dash_pattern(16.0), (16, 16))
         self.assertEqual(grid_dash_pattern(64.0), (16, 16))
         self.assertEqual(grid_dash_pattern(512.0), (13, 13))
+
+    def test_vertical_guide_runs_from_ground_grid_to_elevated_star(self) -> None:
+        app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+        app.spacing = 64.0
+        app.canvas = SimpleNamespace(create_line=Mock(), create_oval=Mock())
+        app._palette = lambda color: color
+        center = (300.0, 200.0)
+        coordinates = (1_000, -500, 250)
+
+        app._draw_vertical_guide(*coordinates, *center)
+
+        ground_point = project_isometric(
+            coordinates[0], coordinates[1], 0, *center, app.spacing
+        )
+        star_point = project_isometric(*coordinates, *center, app.spacing)
+        app.canvas.create_line.assert_called_once_with(
+            *ground_point,
+            *star_point,
+            fill=MUTED,
+            width=1,
+            dash=grid_dash_pattern(app.spacing),
+        )
+        app.canvas.create_oval.assert_called_once_with(
+            ground_point[0] - 2,
+            ground_point[1] - 2,
+            ground_point[0] + 2,
+            ground_point[1] + 2,
+            fill=MUTED,
+            outline="",
+        )
+
+    def test_add_preview_is_visible_only_during_system_placement(self) -> None:
+        for is_adding, expected_lines, expected_ovals in (
+            (False, 0, 0),
+            (True, 1, 2),
+        ):
+            with self.subTest(is_adding=is_adding):
+                app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+                app.project_data = {"systems": []}
+                app.selected_system_id = None
+                app._is_adding_system = is_adding
+                app._hovered_system_id = None
+                app.spacing = 64.0
+                app.canvas_background = "#000000"
+                app.canvas = SimpleNamespace(
+                    create_line=Mock(),
+                    create_oval=Mock(),
+                )
+                app.x_var = SimpleNamespace(get=lambda: "1000")
+                app.y_var = SimpleNamespace(get=lambda: "-500")
+                app.z_var = SimpleNamespace(get=lambda: "250")
+                app._palette = lambda color: color
+                app._draw_vertical_guide = lambda x, y, z, center_x, center_y: (
+                    PlanetDatabaseApp._draw_vertical_guide(
+                        app, x, y, z, center_x, center_y
+                    )
+                )
+
+                app._draw_systems(300.0, 200.0)
+
+                self.assertEqual(app.canvas.create_line.call_count, expected_lines)
+                self.assertEqual(app.canvas.create_oval.call_count, expected_ovals)
+
+    def test_right_click_preserves_z_when_repositioning_new_system(self) -> None:
+        for is_adding, initial_z, expected_z in (
+            (True, "1250", "1250"),
+            (False, "900", "0"),
+        ):
+            with self.subTest(is_adding=is_adding):
+                app = PlanetDatabaseApp.__new__(PlanetDatabaseApp)
+                app._is_adding_system = is_adding
+                app.selected_system_id = None
+                app.spacing = 64.0
+                app.x_var = SimpleNamespace(set=Mock())
+                app.y_var = SimpleNamespace(set=Mock())
+                app.z_var = SimpleNamespace(get=lambda: initial_z, set=Mock())
+                app.id_var = SimpleNamespace(set=Mock())
+                app.name_var = SimpleNamespace(set=Mock())
+                app.star_type_var = SimpleNamespace(set=Mock())
+                app.status_var = SimpleNamespace(set=Mock())
+                app._canvas_center = Mock(return_value=(300.0, 200.0))
+                app._nearest_system = Mock(return_value=None)
+                app._refresh_systems = Mock()
+                app._open_star_editor = Mock()
+                app._show_system_editor = Mock()
+                app._set_notes_text = Mock()
+                app._update_nearest_references = Mock()
+                app._draw_grid = Mock()
+                event = SimpleNamespace(x=400, y=250)
+
+                with patch("main.snap_to_grid", return_value=(2_000, -500)):
+                    app._on_canvas_click(event)
+
+                app.z_var.set.assert_called_once_with(expected_z)
 
     def test_visible_grid_bounds_move_with_pan(self) -> None:
         original = viewport_ground_bounds(1200, 800, 600, 400, 20.0)
@@ -395,6 +640,13 @@ class InfiniteLightyearGridTests(unittest.TestCase):
         self.assertEqual(center, (501_000, -299_500, 20_500))
         self.assertGreaterEqual(spacing, MIN_SPACING)
         self.assertLessEqual(spacing, MAX_SPACING)
+
+    def test_single_system_fit_uses_the_increased_zoom_limit(self) -> None:
+        _center, spacing = fit_view_to_systems(
+            [{"x": 0, "y": 0, "z": 0}], 1200, 800
+        )
+
+        self.assertEqual(spacing, MAX_SPACING)
 
 
 if __name__ == "__main__":
